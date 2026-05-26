@@ -1,14 +1,12 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+mod playback;
+mod program;
+pub mod widget;
+mod yuv;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use playback::{
+    AvError, AvEvent, Format, MediaSource, PlaybackControlError, PlaybackController,
+    PlaybackOptions, PlaybackSession, Size, Yuv, default_media_path, default_media_source, spawn,
+    spawn_default, spawn_session, spawn_session_default, spawn_session_with_source,
+    spawn_session_with_source_and_options, spawn_with_source,
+};
+pub use program::{OpacityController, OpacityOptions, OpacityTween, Program, ScaleMode};
