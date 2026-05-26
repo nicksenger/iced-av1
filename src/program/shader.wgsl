@@ -46,9 +46,14 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
+    var chroma_uv = input.uv / uniforms.sampling_factor;
+    if uniforms.cover_mode > 0.5 {
+        chroma_uv = input.uv;
+    }
+
     let c = textureSample(yuv_texture, yuv_sampler, input.uv, 0).x - 0.062745;
-    let d = textureSample(yuv_texture, yuv_sampler, input.uv / uniforms.sampling_factor, 1).x - 0.5;
-    let e = textureSample(yuv_texture, yuv_sampler, input.uv / uniforms.sampling_factor, 2).x - 0.5;
+    let d = textureSample(yuv_texture, yuv_sampler, chroma_uv, 1).x - 0.5;
+    let e = textureSample(yuv_texture, yuv_sampler, chroma_uv, 2).x - 0.5;
 
     return vec4<f32>(
         clamp(c + 1.596027 * e, 0.0, 1.0),
