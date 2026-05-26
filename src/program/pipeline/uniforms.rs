@@ -1,17 +1,17 @@
-use glam::Vec2;
-
 use crate::program::ScaleMode;
 use crate::yuv::Size;
 
 #[derive(Copy, Clone, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct Uniforms {
-    sampling_factor: Vec2,
-    size: Vec2,
-    uv_scale: Vec2,
-    uv_offset: Vec2,
+    sampling_factor: [f32; 2],
+    size: [f32; 2],
+    uv_scale: [f32; 2],
+    uv_offset: [f32; 2],
     opacity: f32,
-    _padding: Vec2,
+    _padding0: f32,
+    _padding1: f32,
+    _padding2: f32,
 }
 
 impl Uniforms {
@@ -28,12 +28,14 @@ impl Uniforms {
         };
 
         Self {
-            sampling_factor: (sampling_factor, sampling_factor).into(),
-            size: (size.width, size.height).into(),
-            uv_scale: uv_scale.into(),
-            uv_offset: uv_offset.into(),
+            sampling_factor: [sampling_factor, sampling_factor],
+            size: [size.width, size.height],
+            uv_scale: [uv_scale.0, uv_scale.1],
+            uv_offset: [uv_offset.0, uv_offset.1],
             opacity,
-            _padding: (0.0, 0.0).into(),
+            _padding0: 0.0,
+            _padding1: 0.0,
+            _padding2: 0.0,
         }
     }
 }
@@ -61,7 +63,7 @@ fn cover_uv(container: Size, image: Size) -> ((f32, f32), (f32, f32)) {
 
 #[cfg(test)]
 mod tests {
-    use super::cover_uv;
+    use super::{Uniforms, cover_uv};
     use crate::yuv::Size;
 
     const EPSILON: f32 = 1e-6;
@@ -109,5 +111,13 @@ mod tests {
         assert_close(scale.1, 0.5);
         assert_close(offset.0, 0.0);
         assert_close(offset.1, 0.25);
+    }
+
+    #[test]
+    fn uniforms_layout_matches_wgsl() {
+        use std::mem::{align_of, size_of};
+
+        assert_eq!(size_of::<Uniforms>(), 48);
+        assert_eq!(align_of::<Uniforms>(), 4);
     }
 }
