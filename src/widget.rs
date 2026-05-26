@@ -1,16 +1,25 @@
+use futures_lite::StreamExt;
 use futures_lite::stream;
 use iced::widget::shader;
 use iced::{Element, Fill, Subscription};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 
-use crate::{AvError, AvEvent, MediaSource, Program, Yuv, default_media_source, spawn_with_source};
+use crate::{
+    AvError, AvEvent, MediaSource, PlaybackControlError, PlaybackController, PlaybackOptions,
+    Program, Yuv, default_media_source, spawn_session_with_source_and_options,
+};
 
-static AV_EVENT_RX: OnceLock<Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AvEvent>>>> =
-    OnceLock::new();
+static NEXT_SUBSCRIPTION_ID: AtomicU64 = AtomicU64::new(1);
+static AV_EVENT_RXS: OnceLock<
+    Mutex<HashMap<u64, Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AvEvent>>>>>,
+> = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -21,6 +30,8 @@ pub enum Message {
 
 pub struct State {
     program: Option<Program>,
+    controller: PlaybackController,
+    subscription_id: u64,
 }
 
 impl State {
@@ -37,12 +48,24 @@ impl State {
     }
 
     pub fn new_with_media_source(media_source: MediaSource) -> Result<Self, AvError> {
-        if AV_EVENT_RX.get().is_none() {
-            let receiver = spawn_with_source(media_source);
-            let _ = AV_EVENT_RX.set(Arc::new(tokio::sync::Mutex::new(receiver)));
-        }
+        Self::new_with_media_source_and_options(media_source, PlaybackOptions::default())
+    }
 
-        Ok(Self { program: None })
+    pub fn new_with_media_source_and_options(
+        media_source: MediaSource,
+        options: PlaybackOptions,
+    ) -> Result<Self, AvError> {
+        let session = spawn_session_with_source_and_options(media_source, options);
+        let receiver = Arc::new(tokio::sync::Mutex::new(session.events));
+        let subscription_id = NEXT_SUBSCRIPTION_ID.fetch_add(1, Ordering::Relaxed);
+        let mut receivers = receiver_map().lock().expect("AV receiver map poisoned");
+        receivers.insert(subscription_id, receiver.clone());
+
+        Ok(Self {
+            program: None,
+            controller: session.controller,
+            subscription_id,
+        })
     }
 
     pub fn update(&mut self, message: Message) {
@@ -72,24 +95,47 @@ impl State {
         Some(overlay.map(map))
     }
 
-    pub fn subscription<MessageT: 'static, Mapper>(
-        &self,
-        map: Mapper,
-    ) -> Subscription<MessageT>
+    pub fn subscription<MessageT: 'static, Mapper>(&self, map: Mapper) -> Subscription<MessageT>
     where
         Mapper: Fn(Message) -> MessageT + Clone + Send + 'static,
     {
-        if AV_EVENT_RX.get().is_some() {
-            Subscription::run(av_event_stream).map(map)
-        } else {
-            Subscription::none()
+        Subscription::run_with(self.subscription_id, av_event_stream).map(map)
+    }
+
+    pub fn seek(&self, timestamp_ns: u64) -> Result<(), PlaybackControlError> {
+        self.controller.seek(timestamp_ns)
+    }
+
+    pub fn set_start_offset(&self, timestamp_ns: u64) -> Result<(), PlaybackControlError> {
+        self.controller.set_start_offset(timestamp_ns)
+    }
+
+    pub fn controller(&self) -> PlaybackController {
+        self.controller.clone()
+    }
+}
+
+impl Drop for State {
+    fn drop(&mut self) {
+        if let Ok(mut receivers) = receiver_map().lock() {
+            receivers.remove(&self.subscription_id);
         }
     }
 }
 
-fn av_event_stream() -> impl futures_lite::Stream<Item = Message> {
-    stream::unfold((), |_| async move {
-        let receiver = AV_EVENT_RX.get()?.clone();
+fn receiver_map()
+-> &'static Mutex<HashMap<u64, Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AvEvent>>>>> {
+    AV_EVENT_RXS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn av_event_stream(subscription_id: &u64) -> futures_lite::stream::Boxed<Message> {
+    let subscription_id = *subscription_id;
+    stream::unfold((), move |_| async move {
+        let receiver = {
+            let receivers = receiver_map().lock().ok()?;
+            receivers.get(&subscription_id).cloned()
+        }?;
+
         let mut guard = receiver.lock().await;
         let event = guard.recv().await?;
 
@@ -101,4 +147,5 @@ fn av_event_stream() -> impl futures_lite::Stream<Item = Message> {
 
         Some((message, ()))
     })
+    .boxed()
 }

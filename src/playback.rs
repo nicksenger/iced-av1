@@ -45,6 +45,41 @@ pub enum AvEvent {
     PlaybackError(String),
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PlaybackOptions {
+    pub start_offset_ns: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlaybackController {
+    tx: mpsc::UnboundedSender<PlaybackCommand>,
+}
+
+impl PlaybackController {
+    pub fn seek(&self, timestamp_ns: u64) -> Result<(), PlaybackControlError> {
+        self.tx
+            .send(PlaybackCommand::SeekTo(timestamp_ns))
+            .map_err(|_| PlaybackControlError::WorkerClosed)
+    }
+
+    pub fn set_start_offset(&self, timestamp_ns: u64) -> Result<(), PlaybackControlError> {
+        self.tx
+            .send(PlaybackCommand::SetStartOffset(timestamp_ns))
+            .map_err(|_| PlaybackControlError::WorkerClosed)
+    }
+}
+
+pub struct PlaybackSession {
+    pub events: mpsc::UnboundedReceiver<AvEvent>,
+    pub controller: PlaybackController,
+}
+
+#[derive(Debug, Error)]
+pub enum PlaybackControlError {
+    #[error("playback worker is closed")]
+    WorkerClosed,
+}
+
 #[derive(Debug, Error)]
 pub enum AvError {
     #[error("missing HOME for AV media path: {0}")]
@@ -60,6 +95,8 @@ pub enum AvError {
     MissingVideoTrack,
     #[error("failed to initialize AV1 decoder: {0}")]
     VideoDecoder(String),
+    #[error("seek requested to timestamp: {0}")]
+    SeekRequested(u64),
 }
 
 #[derive(Debug)]
@@ -67,6 +104,18 @@ struct SelectedTracks {
     timestamp_scale_ns: u64,
     video_track: u64,
     video_default_duration_ns: Option<u64>,
+}
+
+#[derive(Debug)]
+enum PlaybackCommand {
+    SeekTo(u64),
+    SetStartOffset(u64),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlaybackAction {
+    Continue,
+    RestartAt(u64),
 }
 
 struct PlaybackClock {
@@ -109,6 +158,12 @@ impl PlaybackClock {
             thread::sleep(remaining);
         }
     }
+
+    fn set_base_timestamp(&mut self, base_timestamp_ns: u64) {
+        self.start = Instant::now();
+        self.base_timestamp_ns = Some(base_timestamp_ns);
+        self.synthetic_timestamp_ns = base_timestamp_ns;
+    }
 }
 
 pub fn spawn_default() -> Result<mpsc::UnboundedReceiver<AvEvent>, AvError> {
@@ -120,20 +175,48 @@ pub fn spawn(media_path: PathBuf) -> mpsc::UnboundedReceiver<AvEvent> {
 }
 
 pub fn spawn_with_source(media_source: MediaSource) -> mpsc::UnboundedReceiver<AvEvent> {
+    spawn_session_with_source(media_source).events
+}
+
+pub fn spawn_session_default() -> Result<PlaybackSession, AvError> {
+    Ok(spawn_session_with_source(default_media_source()?))
+}
+
+pub fn spawn_session(media_path: PathBuf) -> PlaybackSession {
+    spawn_session_with_source(MediaSource::File(media_path))
+}
+
+pub fn spawn_session_with_source(media_source: MediaSource) -> PlaybackSession {
+    spawn_session_with_source_and_options(media_source, PlaybackOptions::default())
+}
+
+pub fn spawn_session_with_source_and_options(
+    media_source: MediaSource,
+    options: PlaybackOptions,
+) -> PlaybackSession {
     let (tx, rx) = mpsc::unbounded_channel();
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
     thread::Builder::new()
         .name(String::from("iced-av1-playback"))
-        .spawn(move || run_worker(media_source, tx))
+        .spawn(move || run_worker(media_source, options, tx, cmd_rx))
         .map_err(|error| {
             warn!(%error, "failed to spawn AV worker thread");
         })
         .ok();
 
-    rx
+    PlaybackSession {
+        events: rx,
+        controller: PlaybackController { tx: cmd_tx },
+    }
 }
 
-fn run_worker(media_source: MediaSource, tx: mpsc::UnboundedSender<AvEvent>) {
+fn run_worker(
+    media_source: MediaSource,
+    options: PlaybackOptions,
+    tx: mpsc::UnboundedSender<AvEvent>,
+    mut cmd_rx: mpsc::UnboundedReceiver<PlaybackCommand>,
+) {
     debug!(source = %media_source.describe(), "started AV worker");
     if let Some(media_path) = media_source_file_path(&media_source)
         && !media_path.exists()
@@ -148,15 +231,32 @@ fn run_worker(media_source: MediaSource, tx: mpsc::UnboundedSender<AvEvent>) {
     }
 
     let mut loop_index: u64 = 0;
+    let mut start_offset_ns = options.start_offset_ns;
+    let mut seek_override_ns = Some(start_offset_ns);
     loop {
         loop_index = loop_index.saturating_add(1);
+
+        match drain_commands(&mut cmd_rx, &mut start_offset_ns) {
+            PlaybackAction::Continue => {}
+            PlaybackAction::RestartAt(offset_ns) => {
+                seek_override_ns = Some(offset_ns);
+            }
+        }
+
         debug!(
             source = %media_source.describe(),
             loop_index,
             "starting AV playback loop"
         );
 
-        match play_media_source(&media_source, &tx) {
+        let loop_offset_ns = seek_override_ns.take().unwrap_or(start_offset_ns);
+        match play_media_source(
+            &media_source,
+            loop_offset_ns,
+            &tx,
+            &mut cmd_rx,
+            &mut start_offset_ns,
+        ) {
             Ok(()) => {
                 if tx.is_closed() {
                     break;
@@ -167,6 +267,9 @@ fn run_worker(media_source: MediaSource, tx: mpsc::UnboundedSender<AvEvent>) {
                     loop_index,
                     "completed AV playback loop"
                 );
+            }
+            Err(AvError::SeekRequested(offset_ns)) => {
+                seek_override_ns = Some(offset_ns);
             }
             Err(error) => {
                 warn!(%error, source = %media_source.describe(), loop_index, "AV playback failed");
@@ -185,14 +288,32 @@ fn run_worker(media_source: MediaSource, tx: mpsc::UnboundedSender<AvEvent>) {
 
 fn play_media_source(
     media_source: &MediaSource,
+    start_offset_ns: u64,
     tx: &mpsc::UnboundedSender<AvEvent>,
+    cmd_rx: &mut mpsc::UnboundedReceiver<PlaybackCommand>,
+    default_start_offset_ns: &mut u64,
 ) -> Result<(), AvError> {
     match media_source {
-        MediaSource::File(path) => play_media_file(path, tx),
-        MediaSource::Directory(path) => play_media_file(path.join(DEFAULT_MEDIA_FILE_NAME), tx),
+        MediaSource::File(path) => {
+            play_media_file(path, start_offset_ns, tx, cmd_rx, default_start_offset_ns)
+        }
+        MediaSource::Directory(path) => play_media_file(
+            path.join(DEFAULT_MEDIA_FILE_NAME),
+            start_offset_ns,
+            tx,
+            cmd_rx,
+            default_start_offset_ns,
+        ),
         MediaSource::Bytes(bytes) => {
             let reader = Cursor::new(bytes.as_ref());
-            play_media(reader, "memory", tx)
+            play_media(
+                reader,
+                "memory",
+                start_offset_ns,
+                tx,
+                cmd_rx,
+                default_start_offset_ns,
+            )
         }
     }
 }
@@ -207,7 +328,10 @@ fn media_source_file_path(media_source: &MediaSource) -> Option<PathBuf> {
 
 fn play_media_file(
     path: impl AsRef<Path>,
+    start_offset_ns: u64,
     tx: &mpsc::UnboundedSender<AvEvent>,
+    cmd_rx: &mut mpsc::UnboundedReceiver<PlaybackCommand>,
+    default_start_offset_ns: &mut u64,
 ) -> Result<(), AvError> {
     let path = path.as_ref();
     let file = File::open(path).map_err(|source| AvError::OpenMedia {
@@ -215,13 +339,23 @@ fn play_media_file(
         source,
     })?;
 
-    play_media(file, path.to_string_lossy().as_ref(), tx)
+    play_media(
+        file,
+        path.to_string_lossy().as_ref(),
+        start_offset_ns,
+        tx,
+        cmd_rx,
+        default_start_offset_ns,
+    )
 }
 
 fn play_media<R: Read + Seek>(
     reader: R,
     source_label: &str,
+    start_offset_ns: u64,
     tx: &mpsc::UnboundedSender<AvEvent>,
+    cmd_rx: &mut mpsc::UnboundedReceiver<PlaybackCommand>,
+    default_start_offset_ns: &mut u64,
 ) -> Result<(), AvError> {
     let mut matroska =
         MatroskaFile::open(reader).map_err(|error| AvError::Demux(error.to_string()))?;
@@ -238,6 +372,7 @@ fn play_media<R: Read + Seek>(
 
     let mut frame = Frame::default();
     let mut playback_clock = PlaybackClock::new();
+    let mut reached_start_offset = start_offset_ns == 0;
 
     while matroska
         .next_frame(&mut frame)
@@ -247,8 +382,20 @@ fn play_media<R: Read + Seek>(
             return Ok(());
         }
 
+        match drain_commands(cmd_rx, default_start_offset_ns) {
+            PlaybackAction::Continue => {}
+            PlaybackAction::RestartAt(offset_ns) => return Err(AvError::SeekRequested(offset_ns)),
+        }
+
         if frame.track == tracks.video_track {
             let timestamp_ns = frame.timestamp.saturating_mul(tracks.timestamp_scale_ns);
+            if !reached_start_offset {
+                if timestamp_ns < start_offset_ns {
+                    continue;
+                }
+                reached_start_offset = true;
+                playback_clock.set_base_timestamp(timestamp_ns);
+            }
             let frame_duration_ns = frame
                 .duration
                 .map(|duration| duration.saturating_mul(tracks.timestamp_scale_ns))
@@ -490,6 +637,30 @@ fn timestamp_ns_to_i64(value: u64) -> i64 {
         i64::MAX
     } else {
         value as i64
+    }
+}
+
+fn drain_commands(
+    cmd_rx: &mut mpsc::UnboundedReceiver<PlaybackCommand>,
+    default_start_offset_ns: &mut u64,
+) -> PlaybackAction {
+    let mut restart_at = None;
+
+    while let Ok(command) = cmd_rx.try_recv() {
+        match command {
+            PlaybackCommand::SeekTo(offset_ns) => {
+                restart_at = Some(offset_ns);
+            }
+            PlaybackCommand::SetStartOffset(offset_ns) => {
+                *default_start_offset_ns = offset_ns;
+            }
+        }
+    }
+
+    if let Some(offset_ns) = restart_at {
+        PlaybackAction::RestartAt(offset_ns)
+    } else {
+        PlaybackAction::Continue
     }
 }
 
