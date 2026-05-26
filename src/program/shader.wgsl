@@ -1,9 +1,10 @@
 struct Uniforms {
     sampling_factor: vec2<f32>,
     size: vec2<f32>,
-    scale: vec2<f32>,
+    uv_scale: vec2<f32>,
+    uv_offset: vec2<f32>,
     opacity: f32,
-    _padding: f32,
+    _padding: vec2<f32>,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -25,7 +26,11 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
     let v_pos = vertex_position(input.vertex_index);
-    out.uv = vec2<f32>(v_pos.x * uniforms.scale.x, 1.0 - (v_pos.y * uniforms.scale.y));
+    let uv = vec2<f32>(
+        v_pos.x * uniforms.uv_scale.x + uniforms.uv_offset.x,
+        v_pos.y * uniforms.uv_scale.y + uniforms.uv_offset.y
+    );
+    out.uv = vec2<f32>(uv.x, 1.0 - uv.y);
 
     var transform: mat4x4<f32> = mat4x4<f32>(
         vec4<f32>(uniforms.size.x, 0.0, 0.0, 0.0),

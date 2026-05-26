@@ -15,7 +15,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::{
     AvError, AvEvent, MediaSource, PlaybackControlError, PlaybackController, PlaybackOptions,
-    Program, Yuv, default_media_source, spawn_session_with_source_and_options,
+    Program, ScaleMode, Yuv, default_media_source, spawn_session_with_source_and_options,
 };
 use crate::{OpacityController, OpacityOptions, OpacityTween};
 
@@ -35,6 +35,7 @@ pub struct State {
     program: Option<Program>,
     controller: PlaybackController,
     opacity: OpacityController,
+    scale_mode: ScaleMode,
     subscription_id: u64,
 }
 
@@ -82,6 +83,7 @@ impl State {
             program: None,
             controller: session.controller,
             opacity,
+            scale_mode: ScaleMode::default(),
             subscription_id,
         })
     }
@@ -92,7 +94,11 @@ impl State {
                 if let Some(program) = self.program.as_mut() {
                     program.update_frame(frame);
                 } else {
-                    self.program = Some(Program::new_with_opacity(frame, self.opacity.clone()));
+                    self.program = Some(Program::new_with_opacity_and_scale_mode(
+                        frame,
+                        self.opacity.clone(),
+                        self.scale_mode,
+                    ));
                 }
             }
             Message::Ended => {
@@ -126,7 +132,10 @@ impl State {
     where
         Mapper: Fn(Message) -> MessageT + Clone + Send + 'static,
     {
-        map_subscription(Subscription::run_with(self.subscription_id, av_event_stream), map)
+        map_subscription(
+            Subscription::run_with(self.subscription_id, av_event_stream),
+            map,
+        )
     }
 
     pub fn seek(&self, timestamp_ns: u64) -> Result<(), PlaybackControlError> {
@@ -159,6 +168,17 @@ impl State {
 
     pub fn opacity_controller(&self) -> OpacityController {
         self.opacity.clone()
+    }
+
+    pub fn scale_mode(&self) -> ScaleMode {
+        self.scale_mode
+    }
+
+    pub fn set_scale_mode(&mut self, scale_mode: ScaleMode) {
+        self.scale_mode = scale_mode;
+        if let Some(program) = self.program.as_mut() {
+            program.set_scale_mode(scale_mode);
+        }
     }
 }
 
@@ -208,11 +228,12 @@ where
         }
     }
 
-    Subscription::batch(
-        into_recipes(subscription)
-            .into_iter()
-            .map(|recipe| from_recipe(MapRecipe { recipe, mapper: map.clone() })),
-    )
+    Subscription::batch(into_recipes(subscription).into_iter().map(|recipe| {
+        from_recipe(MapRecipe {
+            recipe,
+            mapper: map.clone(),
+        })
+    }))
 }
 
 fn receiver_map()
