@@ -15,6 +15,7 @@ use crate::{
     AvError, AvEvent, MediaSource, PlaybackControlError, PlaybackController, PlaybackOptions,
     Program, Yuv, default_media_source, spawn_session_with_source_and_options,
 };
+use crate::{OpacityController, OpacityOptions, OpacityTween};
 
 static NEXT_SUBSCRIPTION_ID: AtomicU64 = AtomicU64::new(1);
 static AV_EVENT_RXS: OnceLock<
@@ -31,6 +32,7 @@ pub enum Message {
 pub struct State {
     program: Option<Program>,
     controller: PlaybackController,
+    opacity: OpacityController,
     subscription_id: u64,
 }
 
@@ -53,17 +55,31 @@ impl State {
 
     pub fn new_with_media_source_and_options(
         media_source: MediaSource,
-        options: PlaybackOptions,
+        playback_options: PlaybackOptions,
     ) -> Result<Self, AvError> {
-        let session = spawn_session_with_source_and_options(media_source, options);
+        Self::new_with_media_source_and_opacity_options(
+            media_source,
+            playback_options,
+            OpacityOptions::default(),
+        )
+    }
+
+    pub fn new_with_media_source_and_opacity_options(
+        media_source: MediaSource,
+        playback_options: PlaybackOptions,
+        opacity_options: OpacityOptions,
+    ) -> Result<Self, AvError> {
+        let session = spawn_session_with_source_and_options(media_source, playback_options);
         let receiver = Arc::new(tokio::sync::Mutex::new(session.events));
         let subscription_id = NEXT_SUBSCRIPTION_ID.fetch_add(1, Ordering::Relaxed);
         let mut receivers = receiver_map().lock().expect("AV receiver map poisoned");
         receivers.insert(subscription_id, receiver.clone());
+        let opacity = OpacityController::new(opacity_options);
 
         Ok(Self {
             program: None,
             controller: session.controller,
+            opacity,
             subscription_id,
         })
     }
@@ -74,7 +90,7 @@ impl State {
                 if let Some(program) = self.program.as_mut() {
                     program.update_frame(frame);
                 } else {
-                    self.program = Some(Program::new(frame));
+                    self.program = Some(Program::new_with_opacity(frame, self.opacity.clone()));
                 }
             }
             Message::Ended => {
@@ -112,6 +128,26 @@ impl State {
 
     pub fn controller(&self) -> PlaybackController {
         self.controller.clone()
+    }
+
+    pub fn opacity(&self) -> f32 {
+        self.opacity.opacity()
+    }
+
+    pub fn set_opacity(&self, opacity: f32) {
+        self.opacity.set_opacity(opacity);
+    }
+
+    pub fn tween_to_opacity(&self, opacity: f32) {
+        self.opacity.tween_to_opacity(opacity);
+    }
+
+    pub fn tween_to_opacity_with(&self, opacity: f32, tween: OpacityTween) {
+        self.opacity.tween_to_opacity_with(opacity, tween);
+    }
+
+    pub fn opacity_controller(&self) -> OpacityController {
+        self.opacity.clone()
     }
 }
 

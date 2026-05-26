@@ -8,6 +8,8 @@ pub struct Uniforms {
     sampling_factor: Vec2,
     size: Vec2,
     scale: Vec2,
+    opacity: f32,
+    _padding: f32,
 }
 
 impl Uniforms {
@@ -16,6 +18,7 @@ impl Uniforms {
         image_dimensions: Size,
         sampling_factor: f32,
         target_size: Size,
+        opacity: f32,
     ) -> Self {
         let image_dimensions: Vec2 = (image_dimensions.width, image_dimensions.height).into();
         let scale = (
@@ -28,6 +31,8 @@ impl Uniforms {
             sampling_factor: (sampling_factor, sampling_factor).into(),
             size: (size.width, size.height).into(),
             scale,
+            opacity,
+            _padding: 0.0,
         }
     }
 }

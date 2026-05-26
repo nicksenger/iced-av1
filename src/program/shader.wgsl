@@ -2,6 +2,8 @@ struct Uniforms {
     sampling_factor: vec2<f32>,
     size: vec2<f32>,
     scale: vec2<f32>,
+    opacity: f32,
+    _padding: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -47,7 +49,7 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
         clamp(c + 1.596027 * e, 0.0, 1.0),
         clamp(c - 0.391762 * d - 0.812968 * e, 0.0, 1.0),
         clamp(c + 2.017232 * d, 0.0, 1.0),
-        0.5
+        uniforms.opacity
     );
 }
 
