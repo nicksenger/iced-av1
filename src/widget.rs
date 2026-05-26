@@ -4,9 +4,10 @@ use iced::{Element, Fill, Subscription};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
-use crate::{AvError, AvEvent, Program, Yuv, default_media_path, spawn};
+use crate::{AvError, AvEvent, MediaSource, Program, Yuv, default_media_source, spawn_with_source};
 
 static AV_EVENT_RX: OnceLock<Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AvEvent>>>> =
     OnceLock::new();
@@ -24,15 +25,21 @@ pub struct State {
 
 impl State {
     pub fn new() -> Result<Self, AvError> {
-        if AV_EVENT_RX.get().is_none() {
-            let media_path = default_media_path()?;
+        Self::new_with_media_source(default_media_source()?)
+    }
 
-            if media_path.exists() {
-                let receiver = spawn(media_path);
-                let _ = AV_EVENT_RX.set(Arc::new(tokio::sync::Mutex::new(receiver)));
-            } else {
-                debug!("AV media file not found; overlay playback disabled");
-            }
+    pub fn new_with_media_directory(media_directory: impl Into<PathBuf>) -> Result<Self, AvError> {
+        Self::new_with_media_source(MediaSource::Directory(media_directory.into()))
+    }
+
+    pub fn new_with_media_bytes(media_bytes: Vec<u8>) -> Result<Self, AvError> {
+        Self::new_with_media_source(MediaSource::from_bytes(media_bytes))
+    }
+
+    pub fn new_with_media_source(media_source: MediaSource) -> Result<Self, AvError> {
+        if AV_EVENT_RX.get().is_none() {
+            let receiver = spawn_with_source(media_source);
+            let _ = AV_EVENT_RX.set(Arc::new(tokio::sync::Mutex::new(receiver)));
         }
 
         Ok(Self { program: None })

@@ -3,7 +3,9 @@ use re_rav1d::dav1d::{
     Decoder as Av1Decoder, Error as Av1DecodeError, Picture, PixelLayout, PlanarImageComponent,
 };
 use std::fs::File;
+use std::io::{Cursor, Read, Seek};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -14,6 +16,27 @@ pub use crate::yuv::{Format, Size, Yuv};
 
 const DEFAULT_MEDIA_FILE_NAME: &str = "mitb.mkv";
 const DEFAULT_FRAME_DURATION_NS: u64 = 33_333_333;
+
+#[derive(Debug, Clone)]
+pub enum MediaSource {
+    File(PathBuf),
+    Directory(PathBuf),
+    Bytes(Arc<[u8]>),
+}
+
+impl MediaSource {
+    pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self::Bytes(Arc::<[u8]>::from(bytes))
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            Self::File(path) => format!("file:{}", path.display()),
+            Self::Directory(path) => format!("dir:{}", path.display()),
+            Self::Bytes(bytes) => format!("bytes:{}", bytes.len()),
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum AvEvent {
@@ -89,16 +112,19 @@ impl PlaybackClock {
 }
 
 pub fn spawn_default() -> Result<mpsc::UnboundedReceiver<AvEvent>, AvError> {
-    let media_path = default_media_path()?;
-    Ok(spawn(media_path))
+    Ok(spawn_with_source(default_media_source()?))
 }
 
 pub fn spawn(media_path: PathBuf) -> mpsc::UnboundedReceiver<AvEvent> {
+    spawn_with_source(MediaSource::File(media_path))
+}
+
+pub fn spawn_with_source(media_source: MediaSource) -> mpsc::UnboundedReceiver<AvEvent> {
     let (tx, rx) = mpsc::unbounded_channel();
 
     thread::Builder::new()
         .name(String::from("iced-av1-playback"))
-        .spawn(move || run_worker(media_path, tx))
+        .spawn(move || run_worker(media_source, tx))
         .map_err(|error| {
             warn!(%error, "failed to spawn AV worker thread");
         })
@@ -107,10 +133,16 @@ pub fn spawn(media_path: PathBuf) -> mpsc::UnboundedReceiver<AvEvent> {
     rx
 }
 
-fn run_worker(media_path: PathBuf, tx: mpsc::UnboundedSender<AvEvent>) {
-    debug!(path = %media_path.display(), "started AV worker");
-    if !media_path.exists() {
-        debug!(path = %media_path.display(), "AV media file not found; worker exiting");
+fn run_worker(media_source: MediaSource, tx: mpsc::UnboundedSender<AvEvent>) {
+    debug!(source = %media_source.describe(), "started AV worker");
+    if let Some(media_path) = media_source_file_path(&media_source)
+        && !media_path.exists()
+    {
+        debug!(
+            source = %media_source.describe(),
+            path = %media_path.display(),
+            "AV media file not found; worker exiting"
+        );
         let _ = tx.send(AvEvent::PlaybackEnded);
         return;
     }
@@ -119,25 +151,25 @@ fn run_worker(media_path: PathBuf, tx: mpsc::UnboundedSender<AvEvent>) {
     loop {
         loop_index = loop_index.saturating_add(1);
         debug!(
-            path = %media_path.display(),
+            source = %media_source.describe(),
             loop_index,
             "starting AV playback loop"
         );
 
-        match play_media_file(media_path.as_path(), &tx) {
+        match play_media_source(&media_source, &tx) {
             Ok(()) => {
                 if tx.is_closed() {
                     break;
                 }
 
                 debug!(
-                    path = %media_path.display(),
+                    source = %media_source.describe(),
                     loop_index,
                     "completed AV playback loop"
                 );
             }
             Err(error) => {
-                warn!(%error, loop_index, "AV playback failed");
+                warn!(%error, source = %media_source.describe(), loop_index, "AV playback failed");
                 let _ = tx.send(AvEvent::PlaybackError(error.to_string()));
                 thread::sleep(Duration::from_secs(1));
             }
@@ -151,18 +183,52 @@ fn run_worker(media_path: PathBuf, tx: mpsc::UnboundedSender<AvEvent>) {
     let _ = tx.send(AvEvent::PlaybackEnded);
 }
 
-fn play_media_file(path: &Path, tx: &mpsc::UnboundedSender<AvEvent>) -> Result<(), AvError> {
+fn play_media_source(
+    media_source: &MediaSource,
+    tx: &mpsc::UnboundedSender<AvEvent>,
+) -> Result<(), AvError> {
+    match media_source {
+        MediaSource::File(path) => play_media_file(path, tx),
+        MediaSource::Directory(path) => play_media_file(path.join(DEFAULT_MEDIA_FILE_NAME), tx),
+        MediaSource::Bytes(bytes) => {
+            let reader = Cursor::new(bytes.as_ref());
+            play_media(reader, "memory", tx)
+        }
+    }
+}
+
+fn media_source_file_path(media_source: &MediaSource) -> Option<PathBuf> {
+    match media_source {
+        MediaSource::File(path) => Some(path.clone()),
+        MediaSource::Directory(path) => Some(path.join(DEFAULT_MEDIA_FILE_NAME)),
+        MediaSource::Bytes(_) => None,
+    }
+}
+
+fn play_media_file(
+    path: impl AsRef<Path>,
+    tx: &mpsc::UnboundedSender<AvEvent>,
+) -> Result<(), AvError> {
+    let path = path.as_ref();
     let file = File::open(path).map_err(|source| AvError::OpenMedia {
         path: path.to_path_buf(),
         source,
     })?;
 
+    play_media(file, path.to_string_lossy().as_ref(), tx)
+}
+
+fn play_media<R: Read + Seek>(
+    reader: R,
+    source_label: &str,
+    tx: &mpsc::UnboundedSender<AvEvent>,
+) -> Result<(), AvError> {
     let mut matroska =
-        MatroskaFile::open(file).map_err(|error| AvError::Demux(error.to_string()))?;
+        MatroskaFile::open(reader).map_err(|error| AvError::Demux(error.to_string()))?;
     let tracks = select_tracks(&matroska)?;
 
     debug!(
-        path = %path.display(),
+        source = source_label,
         video_track = tracks.video_track,
         "starting AV decode"
     );
@@ -212,7 +278,7 @@ fn play_media_file(path: &Path, tx: &mpsc::UnboundedSender<AvEvent>) -> Result<(
     Ok(())
 }
 
-fn select_tracks(matroska: &MatroskaFile<File>) -> Result<SelectedTracks, AvError> {
+fn select_tracks<R: Read + Seek>(matroska: &MatroskaFile<R>) -> Result<SelectedTracks, AvError> {
     let timestamp_scale_ns = matroska.info().timestamp_scale().get();
 
     let mut video_track = None;
@@ -433,4 +499,8 @@ pub fn default_media_path() -> Result<PathBuf, AvError> {
     path.push(".mitb");
     path.push(DEFAULT_MEDIA_FILE_NAME);
     Ok(path)
+}
+
+pub fn default_media_source() -> Result<MediaSource, AvError> {
+    Ok(MediaSource::File(default_media_path()?))
 }
