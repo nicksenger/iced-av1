@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use iced::mouse;
 use iced::widget::shader;
-use iced::{Rectangle, wgpu, window};
+use iced::{wgpu, window, Rectangle};
 
 use pipeline::Pipeline;
 
@@ -410,7 +410,7 @@ impl State {
                     }
                 };
 
-                let width = cover_bounds.width * 2.0;
+                let width = cover_bounds.width * 4.0;
                 let x = cover_bounds.x - (width - cover_bounds.width) * 0.5;
 
                 Rectangle {
