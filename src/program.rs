@@ -390,7 +390,7 @@ impl State {
                 let container_aspect = bounds.width / bounds.height;
                 let image_aspect = image.width as f32 / image.height as f32;
 
-                if image_aspect > container_aspect {
+                let cover_bounds = if image_aspect > container_aspect {
                     let width = bounds.height * image_aspect;
                     let x = bounds.x - (width - bounds.width) * 0.5;
                     Rectangle {
@@ -408,6 +408,16 @@ impl State {
                         width: bounds.width,
                         height,
                     }
+                };
+
+                let width = cover_bounds.width * 2.0;
+                let x = cover_bounds.x - (width - cover_bounds.width) * 0.5;
+
+                Rectangle {
+                    x,
+                    y: cover_bounds.y,
+                    width,
+                    height: cover_bounds.height,
                 }
             }
         }
@@ -513,9 +523,9 @@ mod tests {
         };
 
         let draw = state.draw_bounds(ScaleMode::Cover);
-        assert_eq!(draw.width, 200.0);
+        assert_eq!(draw.width, 400.0);
         assert_eq!(draw.height, 100.0);
-        assert_eq!(draw.x, -40.0);
+        assert_eq!(draw.x, -140.0);
         assert_eq!(draw.y, 20.0);
     }
 
