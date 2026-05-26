@@ -146,6 +146,14 @@ impl State {
         self.controller.set_start_offset(timestamp_ns)
     }
 
+    pub fn pause(&self) -> Result<(), PlaybackControlError> {
+        self.controller.pause()
+    }
+
+    pub fn resume(&self) -> Result<(), PlaybackControlError> {
+        self.controller.resume()
+    }
+
     pub fn controller(&self) -> PlaybackController {
         self.controller.clone()
     }
