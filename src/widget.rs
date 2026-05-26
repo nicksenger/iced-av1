@@ -1,11 +1,13 @@
-use futures_lite::StreamExt;
 use futures_lite::stream;
 use iced::widget::shader;
 use iced::{Element, Fill, Subscription};
+use iced_futures::subscription::{EventStream, Hasher, Recipe, from_recipe, into_recipes};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
+use std::any::TypeId;
 use std::collections::HashMap;
+use std::hash::Hash as _;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -124,7 +126,7 @@ impl State {
     where
         Mapper: Fn(Message) -> MessageT + Clone + Send + 'static,
     {
-        Subscription::run_with(self.subscription_id, av_event_stream).map(map)
+        map_subscription(Subscription::run_with(self.subscription_id, av_event_stream), map)
     }
 
     pub fn seek(&self, timestamp_ns: u64) -> Result<(), PlaybackControlError> {
@@ -168,6 +170,51 @@ impl Drop for State {
     }
 }
 
+fn map_subscription<T: 'static, U: 'static, Mapper>(
+    subscription: Subscription<T>,
+    map: Mapper,
+) -> Subscription<U>
+where
+    Mapper: Fn(T) -> U + Clone + Send + 'static,
+{
+    struct MapRecipe<T, U, Mapper>
+    where
+        T: 'static,
+        U: 'static,
+        Mapper: Fn(T) -> U + Send + 'static,
+    {
+        recipe: Box<dyn Recipe<Output = T>>,
+        mapper: Mapper,
+    }
+
+    impl<T, U, Mapper> Recipe for MapRecipe<T, U, Mapper>
+    where
+        T: 'static,
+        U: 'static,
+        Mapper: Fn(T) -> U + Send + 'static,
+    {
+        type Output = U;
+
+        fn hash(&self, state: &mut Hasher) {
+            TypeId::of::<Mapper>().hash(state);
+            self.recipe.hash(state);
+        }
+
+        fn stream(self: Box<Self>, input: EventStream) -> iced_futures::BoxStream<Self::Output> {
+            iced_futures::futures::StreamExt::boxed(iced_futures::futures::StreamExt::map(
+                self.recipe.stream(input),
+                self.mapper,
+            ))
+        }
+    }
+
+    Subscription::batch(
+        into_recipes(subscription)
+            .into_iter()
+            .map(|recipe| from_recipe(MapRecipe { recipe, mapper: map.clone() })),
+    )
+}
+
 fn receiver_map()
 -> &'static Mutex<HashMap<u64, Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AvEvent>>>>> {
     AV_EVENT_RXS.get_or_init(|| Mutex::new(HashMap::new()))
@@ -175,7 +222,7 @@ fn receiver_map()
 
 fn av_event_stream(subscription_id: &u64) -> futures_lite::stream::Boxed<Message> {
     let subscription_id = *subscription_id;
-    stream::unfold((), move |_| async move {
+    futures_lite::StreamExt::boxed(stream::unfold((), move |_| async move {
         let receiver = {
             let receivers = receiver_map().lock().ok()?;
             receivers.get(&subscription_id).cloned()
@@ -191,6 +238,5 @@ fn av_event_stream(subscription_id: &u64) -> futures_lite::stream::Boxed<Message
         };
 
         Some((message, ()))
-    })
-    .boxed()
+    }))
 }
