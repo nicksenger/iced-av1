@@ -72,10 +72,13 @@ impl State {
         Some(overlay.map(map))
     }
 
-    pub fn subscription<MessageT: 'static>(
+    pub fn subscription<MessageT: 'static, Mapper>(
         &self,
-        map: fn(Message) -> MessageT,
-    ) -> Subscription<MessageT> {
+        map: Mapper,
+    ) -> Subscription<MessageT>
+    where
+        Mapper: Fn(Message) -> MessageT + Clone + Send + 'static,
+    {
         if AV_EVENT_RX.get().is_some() {
             Subscription::run(av_event_stream).map(map)
         } else {
