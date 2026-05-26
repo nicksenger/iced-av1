@@ -20,13 +20,6 @@ const DEFAULT_OPACITY_TWEEN_DURATION: Duration = Duration::from_millis(180);
 const MIN_REDRAW_INTERVAL: Duration = Duration::from_millis(16);
 const OPACITY_EPSILON: f32 = 0.001;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ScaleMode {
-    #[default]
-    Stretch,
-    Cover,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct OpacityTween {
     pub duration: Duration,
@@ -217,35 +210,21 @@ fn ease_out_cubic(t: f32) -> f32 {
 pub struct Program {
     dimensions: Size<u32>,
     sampling_factor: f32,
-    scale_mode: ScaleMode,
     data: RefCell<Option<Renderable>>,
     opacity: OpacityController,
 }
 
 impl Program {
     pub fn new(yuv: Yuv) -> Self {
-        Self::new_with_opacity_and_scale_mode(
-            yuv,
-            OpacityController::new(OpacityOptions::default()),
-            ScaleMode::default(),
-        )
+        Self::new_with_opacity(yuv, OpacityController::new(OpacityOptions::default()))
     }
 
     pub fn new_with_opacity(yuv: Yuv, opacity: OpacityController) -> Self {
-        Self::new_with_opacity_and_scale_mode(yuv, opacity, ScaleMode::default())
-    }
-
-    pub fn new_with_opacity_and_scale_mode(
-        yuv: Yuv,
-        opacity: OpacityController,
-        scale_mode: ScaleMode,
-    ) -> Self {
         let renderable = Renderable::from(yuv);
 
         Self {
             dimensions: renderable.dimensions(),
             sampling_factor: renderable.downsampling_factor(),
-            scale_mode,
             data: RefCell::new(Some(renderable)),
             opacity,
         }
@@ -269,14 +248,6 @@ impl Program {
 
     pub fn opacity_controller(&self) -> OpacityController {
         self.opacity.clone()
-    }
-
-    pub fn scale_mode(&self) -> ScaleMode {
-        self.scale_mode
-    }
-
-    pub fn set_scale_mode(&mut self, scale_mode: ScaleMode) {
-        self.scale_mode = scale_mode;
     }
 }
 
@@ -322,7 +293,6 @@ impl<Message> shader::Program<Message> for Program {
                 },
             }),
             opacity: tick.opacity,
-            scale_mode: self.scale_mode,
         }
     }
 }
@@ -331,7 +301,6 @@ impl<Message> shader::Program<Message> for Program {
 pub struct Primitive {
     state: Mutex<State>,
     opacity: f32,
-    scale_mode: ScaleMode,
 }
 
 #[derive(Debug)]
@@ -405,8 +374,8 @@ impl shader::Primitive for Primitive {
                         size,
                         yuv.dimensions().into(),
                         yuv.downsampling_factor(),
+                        target_size,
                         self.opacity,
-                        self.scale_mode,
                     ),
                 );
                 pipeline.update_frame(queue, yuv);
@@ -423,8 +392,8 @@ impl shader::Primitive for Primitive {
                         size,
                         (*image_dimensions).into(),
                         *sampling_factor,
+                        target_size,
                         self.opacity,
-                        self.scale_mode,
                     ),
                 );
                 pipeline.update_vertices(queue, state.bounds(), target_size, scale_factor);

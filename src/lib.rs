@@ -9,4 +9,4 @@ pub use playback::{
     spawn_default, spawn_session, spawn_session_default, spawn_session_with_source,
     spawn_session_with_source_and_options, spawn_with_source,
 };
-pub use program::{OpacityController, OpacityOptions, OpacityTween, Program, ScaleMode};
+pub use program::{OpacityController, OpacityOptions, OpacityTween, Program};
