@@ -429,9 +429,8 @@ impl shader::Primitive for Primitive {
             return;
         };
 
-        let original_bounds = state.bounds();
         let draw_bounds = state.draw_bounds(self.scale_mode);
-        let size = Size::from(original_bounds.size());
+        let size = Size::from(draw_bounds.size());
         let target_size = Size::from(viewport.logical_size());
         let scale_factor = viewport.scale_factor();
 
