@@ -6,9 +6,7 @@ use tracing::{debug, warn};
 
 use std::sync::{Arc, OnceLock};
 
-use crate::{
-    AvError, AvEvent, PlaybackOptions, Program, Yuv, default_media_path, spawn_with_options,
-};
+use crate::{AvError, AvEvent, Program, Yuv, default_media_path, spawn};
 
 static AV_EVENT_RX: OnceLock<Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AvEvent>>>> =
     OnceLock::new();
@@ -25,12 +23,12 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(options: PlaybackOptions) -> Result<Self, AvError> {
+    pub fn new() -> Result<Self, AvError> {
         if AV_EVENT_RX.get().is_none() {
             let media_path = default_media_path()?;
 
             if media_path.exists() {
-                let receiver = spawn_with_options(media_path, options);
+                let receiver = spawn(media_path);
                 let _ = AV_EVENT_RX.set(Arc::new(tokio::sync::Mutex::new(receiver)));
             } else {
                 debug!("AV media file not found; overlay playback disabled");
