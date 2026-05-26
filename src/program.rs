@@ -371,6 +371,47 @@ impl State {
             Self::Pending { yuv, .. } => yuv.downsampling_factor(),
         }
     }
+
+    fn draw_bounds(&self, scale_mode: ScaleMode) -> Rectangle {
+        match scale_mode {
+            ScaleMode::Stretch => self.bounds(),
+            ScaleMode::Cover => {
+                let bounds = self.bounds();
+                let image = self.image_dimensions();
+
+                if bounds.width <= 0.0
+                    || bounds.height <= 0.0
+                    || image.width == 0
+                    || image.height == 0
+                {
+                    return bounds;
+                }
+
+                let container_aspect = bounds.width / bounds.height;
+                let image_aspect = image.width as f32 / image.height as f32;
+
+                if image_aspect > container_aspect {
+                    let width = bounds.height * image_aspect;
+                    let x = bounds.x - (width - bounds.width) * 0.5;
+                    Rectangle {
+                        x,
+                        y: bounds.y,
+                        width,
+                        height: bounds.height,
+                    }
+                } else {
+                    let height = bounds.width / image_aspect;
+                    let y = bounds.y - (height - bounds.height) * 0.5;
+                    Rectangle {
+                        x: bounds.x,
+                        y,
+                        width: bounds.width,
+                        height,
+                    }
+                }
+            }
+        }
+    }
 }
 
 impl shader::Primitive for Primitive {
@@ -388,7 +429,8 @@ impl shader::Primitive for Primitive {
             return;
         };
 
-        let size = Size::from(state.bounds().size());
+        let draw_bounds = state.draw_bounds(self.scale_mode);
+        let size = Size::from(draw_bounds.size());
         let target_size = Size::from(viewport.logical_size());
         let scale_factor = viewport.scale_factor();
 
@@ -407,11 +449,10 @@ impl shader::Primitive for Primitive {
                         yuv.downsampling_factor(),
                         target_size,
                         self.opacity,
-                        self.scale_mode,
                     ),
                 );
                 pipeline.update_frame(queue, yuv);
-                pipeline.update_vertices(queue, state.bounds(), target_size, scale_factor);
+                pipeline.update_vertices(queue, draw_bounds, target_size, scale_factor);
             }
             State::Prepared {
                 image_dimensions,
@@ -426,10 +467,9 @@ impl shader::Primitive for Primitive {
                         *sampling_factor,
                         target_size,
                         self.opacity,
-                        self.scale_mode,
                     ),
                 );
-                pipeline.update_vertices(queue, state.bounds(), target_size, scale_factor);
+                pipeline.update_vertices(queue, draw_bounds, target_size, scale_factor);
             }
         }
 
@@ -447,5 +487,60 @@ impl shader::Primitive for Primitive {
         } else {
             false
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ScaleMode, State};
+    use crate::yuv::{Renderable, Size};
+    use iced::Rectangle;
+
+    #[test]
+    fn cover_expands_width_for_wide_video() {
+        let state = State::Prepared {
+            image_dimensions: Size {
+                width: 200,
+                height: 100,
+            },
+            sampling_factor: 1.0,
+            bounds: Rectangle {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        };
+
+        let draw = state.draw_bounds(ScaleMode::Cover);
+        assert_eq!(draw.width, 200.0);
+        assert_eq!(draw.height, 100.0);
+        assert_eq!(draw.x, -40.0);
+        assert_eq!(draw.y, 20.0);
+    }
+
+    #[test]
+    fn stretch_uses_original_bounds() {
+        let state = State::Pending {
+            yuv: Renderable::Y444 {
+                data: vec![0; 3],
+                dimensions: Size {
+                    width: 1,
+                    height: 1,
+                },
+            },
+            bounds: Rectangle {
+                x: 1.0,
+                y: 2.0,
+                width: 3.0,
+                height: 4.0,
+            },
+        };
+
+        let draw = state.draw_bounds(ScaleMode::Stretch);
+        assert_eq!(draw.x, 1.0);
+        assert_eq!(draw.y, 2.0);
+        assert_eq!(draw.width, 3.0);
+        assert_eq!(draw.height, 4.0);
     }
 }

@@ -3,7 +3,7 @@ struct Uniforms {
     size: vec2<f32>,
     scale: vec2<f32>,
     opacity: f32,
-    cover_mode: f32,
+    _padding: f32,
 }
 
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -25,12 +25,7 @@ fn vs_main(input: VertexInput) -> VertexOutput {
     var out: VertexOutput;
 
     let v_pos = vertex_position(input.vertex_index);
-    var uv = vec2<f32>(v_pos.x * uniforms.scale.x, v_pos.y * uniforms.scale.y);
-    if uniforms.cover_mode > 0.5 {
-        let uv_offset = (vec2<f32>(1.0, 1.0) - uniforms.scale) * 0.5;
-        uv = uv + uv_offset;
-    }
-    out.uv = vec2<f32>(uv.x, 1.0 - uv.y);
+    out.uv = vec2<f32>(v_pos.x * uniforms.scale.x, 1.0 - (v_pos.y * uniforms.scale.y));
 
     var transform: mat4x4<f32> = mat4x4<f32>(
         vec4<f32>(uniforms.size.x, 0.0, 0.0, 0.0),
@@ -46,14 +41,9 @@ fn vs_main(input: VertexInput) -> VertexOutput {
 
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4<f32> {
-    var chroma_uv = input.uv / uniforms.sampling_factor;
-    if uniforms.cover_mode > 0.5 {
-        chroma_uv = input.uv;
-    }
-
     let c = textureSample(yuv_texture, yuv_sampler, input.uv, 0).x - 0.062745;
-    let d = textureSample(yuv_texture, yuv_sampler, chroma_uv, 1).x - 0.5;
-    let e = textureSample(yuv_texture, yuv_sampler, chroma_uv, 2).x - 0.5;
+    let d = textureSample(yuv_texture, yuv_sampler, input.uv / uniforms.sampling_factor, 1).x - 0.5;
+    let e = textureSample(yuv_texture, yuv_sampler, input.uv / uniforms.sampling_factor, 2).x - 0.5;
 
     return vec4<f32>(
         clamp(c + 1.596027 * e, 0.0, 1.0),
