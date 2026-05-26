@@ -1,6 +1,6 @@
 use itertools::Itertools;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) enum Renderable {
     Y444 {
         data: Vec<u8>,

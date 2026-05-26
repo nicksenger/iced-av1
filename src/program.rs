@@ -206,6 +206,7 @@ fn ease_out_cubic(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
+#[derive(Clone)]
 pub struct Program {
     dimensions: Size<u32>,
     sampling_factor: f32,

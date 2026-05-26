@@ -111,6 +111,15 @@ impl State {
         Some(overlay.map(map))
     }
 
+    pub fn overlay_view_owned<MessageT: 'static>(
+        &self,
+        map: fn(Message) -> MessageT,
+    ) -> Option<Element<'static, MessageT>> {
+        let program = self.program.as_ref()?.clone();
+        let overlay: Element<'static, Message> = shader(program).width(Fill).height(Fill).into();
+        Some(overlay.map(map))
+    }
+
     pub fn subscription<MessageT: 'static, Mapper>(&self, map: Mapper) -> Subscription<MessageT>
     where
         Mapper: Fn(Message) -> MessageT + Clone + Send + 'static,
