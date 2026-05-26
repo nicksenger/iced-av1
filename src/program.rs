@@ -2,12 +2,14 @@ mod pipeline;
 
 use std::cell::RefCell;
 use std::ops::Deref;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use iced::mouse;
 use iced::widget::shader;
 use iced::{Rectangle, wgpu, window};
+use tokio::sync::mpsc;
 
 use pipeline::Pipeline;
 
@@ -213,13 +215,20 @@ fn ease_out_cubic(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
-#[derive(Clone)]
-pub struct Program {
+#[derive(Debug, Clone, Copy)]
+struct FrameMetadata {
     dimensions: Size<u32>,
     sampling_factor: f32,
+}
+
+#[derive(Clone)]
+pub struct Program {
     scale_mode: ScaleMode,
     data: RefCell<Option<Renderable>>,
+    frame_metadata: RefCell<Option<FrameMetadata>>,
     opacity: OpacityController,
+    frame_receiver: Option<Arc<Mutex<mpsc::UnboundedReceiver<Yuv>>>>,
+    frame_stream_closed: Arc<AtomicBool>,
 }
 
 impl Program {
@@ -240,19 +249,75 @@ impl Program {
         opacity: OpacityController,
         scale_mode: ScaleMode,
     ) -> Self {
-        let renderable = Renderable::from(yuv);
+        let mut program = Self::new_empty_with_opacity_and_scale_mode(opacity, scale_mode, None);
+        program.update_frame(yuv);
+        program
+    }
 
+    pub(crate) fn new_with_frame_receiver(
+        frame_receiver: Arc<Mutex<mpsc::UnboundedReceiver<Yuv>>>,
+        opacity: OpacityController,
+        scale_mode: ScaleMode,
+    ) -> Self {
+        Self::new_empty_with_opacity_and_scale_mode(opacity, scale_mode, Some(frame_receiver))
+    }
+
+    fn new_empty_with_opacity_and_scale_mode(
+        opacity: OpacityController,
+        scale_mode: ScaleMode,
+        frame_receiver: Option<Arc<Mutex<mpsc::UnboundedReceiver<Yuv>>>>,
+    ) -> Self {
         Self {
-            dimensions: renderable.dimensions(),
-            sampling_factor: renderable.downsampling_factor(),
             scale_mode,
-            data: RefCell::new(Some(renderable)),
+            data: RefCell::new(None),
+            frame_metadata: RefCell::new(None),
             opacity,
+            frame_receiver,
+            frame_stream_closed: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub fn update_frame(&mut self, yuv: Yuv) {
-        *self.data.borrow_mut() = Some(yuv.into());
+        self.store_frame(yuv);
+    }
+
+    fn store_frame(&self, yuv: Yuv) {
+        let renderable = Renderable::from(yuv);
+        *self.frame_metadata.borrow_mut() = Some(FrameMetadata {
+            dimensions: renderable.dimensions(),
+            sampling_factor: renderable.downsampling_factor(),
+        });
+        *self.data.borrow_mut() = Some(renderable);
+    }
+
+    fn drain_incoming_frames(&self) -> bool {
+        let Some(receiver) = self.frame_receiver.as_ref() else {
+            return false;
+        };
+
+        let Ok(mut receiver) = receiver.lock() else {
+            return false;
+        };
+
+        let mut latest = None;
+
+        loop {
+            match receiver.try_recv() {
+                Ok(frame) => latest = Some(frame),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.frame_stream_closed.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
+        }
+
+        if let Some(frame) = latest {
+            self.store_frame(frame);
+            true
+        } else {
+            false
+        }
     }
 
     pub fn set_opacity(&self, opacity: f32) {
@@ -296,12 +361,22 @@ impl<Message> shader::Program<Message> for Program {
             _ => Instant::now(),
         };
 
+        let has_new_frame = self.drain_incoming_frames();
         let tick = self.opacity.tick(now);
-        if tick.animating {
-            Some(shader::Action::request_redraw_at(now + MIN_REDRAW_INTERVAL))
-        } else {
-            None
+
+        if has_new_frame {
+            return Some(shader::Action::request_redraw());
         }
+
+        if tick.animating {
+            return Some(shader::Action::request_redraw_at(now + MIN_REDRAW_INTERVAL));
+        }
+
+        if self.frame_receiver.is_some() && !self.frame_stream_closed.load(Ordering::Relaxed) {
+            return Some(shader::Action::request_redraw_at(now + MIN_REDRAW_INTERVAL));
+        }
+
+        None
     }
 
     fn draw(
@@ -312,15 +387,20 @@ impl<Message> shader::Program<Message> for Program {
     ) -> Self::Primitive {
         let tick = self.opacity.tick(Instant::now());
 
-        Primitive {
-            state: Mutex::new(match self.data.borrow_mut().take() {
-                Some(yuv) => State::Pending { yuv, bounds },
-                None => State::Prepared {
+        let state = match self.data.borrow_mut().take() {
+            Some(yuv) => State::Pending { yuv, bounds },
+            None => match *self.frame_metadata.borrow() {
+                Some(meta) => State::Prepared {
                     bounds,
-                    image_dimensions: self.dimensions,
-                    sampling_factor: self.sampling_factor,
+                    image_dimensions: meta.dimensions,
+                    sampling_factor: meta.sampling_factor,
                 },
-            }),
+                None => State::Empty { bounds },
+            },
+        };
+
+        Primitive {
+            state: Mutex::new(state),
             opacity: tick.opacity,
             scale_mode: self.scale_mode,
         }
@@ -345,12 +425,17 @@ enum State {
         sampling_factor: f32,
         bounds: Rectangle,
     },
+    Empty {
+        bounds: Rectangle,
+    },
 }
 
 impl State {
     fn bounds(&self) -> Rectangle {
         match self {
-            Self::Pending { bounds, .. } | Self::Prepared { bounds, .. } => *bounds,
+            Self::Pending { bounds, .. }
+            | Self::Prepared { bounds, .. }
+            | Self::Empty { bounds } => *bounds,
         }
     }
 
@@ -360,6 +445,10 @@ impl State {
                 image_dimensions, ..
             } => *image_dimensions,
             Self::Pending { yuv, .. } => yuv.dimensions(),
+            Self::Empty { .. } => Size {
+                width: 0,
+                height: 0,
+            },
         }
     }
 
@@ -369,6 +458,7 @@ impl State {
                 sampling_factor, ..
             } => *sampling_factor,
             Self::Pending { yuv, .. } => yuv.downsampling_factor(),
+            Self::Empty { .. } => 1.0,
         }
     }
 
@@ -481,17 +571,27 @@ impl shader::Primitive for Primitive {
                 );
                 pipeline.update_vertices(queue, draw_bounds, target_size, scale_factor);
             }
+            State::Empty { .. } => {}
         }
 
-        *state = State::Prepared {
-            bounds: state.bounds(),
-            image_dimensions: state.image_dimensions(),
-            sampling_factor: state.sampling_factor(),
+        *state = match state.deref() {
+            State::Empty { .. } => State::Empty {
+                bounds: state.bounds(),
+            },
+            _ => State::Prepared {
+                bounds: state.bounds(),
+                image_dimensions: state.image_dimensions(),
+                sampling_factor: state.sampling_factor(),
+            },
         };
     }
 
     fn draw(&self, pipeline: &Self::Pipeline, render_pass: &mut wgpu::RenderPass<'_>) -> bool {
         if let Ok(state) = self.state.lock() {
+            if matches!(state.deref(), State::Empty { .. }) {
+                return false;
+            }
+
             pipeline.draw(render_pass, state.bounds());
             true
         } else {
