@@ -1,7 +1,7 @@
 use futures_lite::stream;
 use iced::widget::shader;
 use iced::{Element, Fill, Subscription};
-use iced_futures::subscription::{EventStream, Hasher, Recipe, from_recipe, into_recipes};
+use iced_futures::subscription::{from_recipe, into_recipes, EventStream, Hasher, Recipe};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -9,15 +9,15 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::hash::Hash as _;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
 use std::thread;
 
 use crate::{
-    AvError, AvEvent, MediaSource, OpacityController, OpacityOptions, OpacityTween,
-    PlaybackControlError, PlaybackController, PlaybackOptions, Program, ScaleMode,
-    default_media_source, spawn_session_with_source_and_options,
+    default_media_source, spawn_session_with_source_and_options, AvError, AvEvent, MediaSource,
+    OpacityController, OpacityOptions, OpacityTween, PlaybackControlError, PlaybackController,
+    PlaybackOptions, Program, ScaleMode,
 };
 
 static NEXT_SUBSCRIPTION_ID: AtomicU64 = AtomicU64::new(1);
@@ -271,8 +271,8 @@ where
     }))
 }
 
-fn receiver_map()
--> &'static Mutex<HashMap<u64, Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Message>>>>> {
+fn receiver_map(
+) -> &'static Mutex<HashMap<u64, Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Message>>>>> {
     AV_EVENT_RXS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 

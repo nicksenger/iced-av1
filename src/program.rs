@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use iced::mouse;
 use iced::widget::shader;
-use iced::{Rectangle, wgpu, window};
+use iced::{wgpu, window, Rectangle};
 use tokio::sync::mpsc;
 
 use pipeline::Pipeline;
@@ -23,11 +23,13 @@ const MIN_REDRAW_INTERVAL: Duration = Duration::from_millis(16);
 const OPACITY_EPSILON: f32 = 0.001;
 static NEXT_RENDER_INSTANCE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum ScaleMode {
     #[default]
     Stretch,
-    Cover,
+    Cover {
+        offset: f32,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -470,7 +472,7 @@ impl State {
     fn draw_bounds(&self, scale_mode: ScaleMode) -> Rectangle {
         match scale_mode {
             ScaleMode::Stretch => self.bounds(),
-            ScaleMode::Cover => {
+            ScaleMode::Cover { offset } => {
                 let bounds = self.bounds();
                 let image = self.image_dimensions();
 
@@ -485,34 +487,22 @@ impl State {
                 let container_aspect = bounds.width / bounds.height;
                 let image_aspect = image.width as f32 / image.height as f32;
 
-                let cover_bounds = if image_aspect > container_aspect {
-                    let width = bounds.height * image_aspect;
-                    let x = bounds.x - (width - bounds.width) * 0.5;
+                if image_aspect > container_aspect {
+                    let width = image.width as f32 * (image.width as f32 / bounds.width);
                     Rectangle {
-                        x,
+                        x: -(width - (bounds.width / image.width as f32) * width) * offset,
                         y: bounds.y,
                         width,
                         height: bounds.height,
                     }
                 } else {
-                    let height = bounds.width / image_aspect;
-                    let y = bounds.y - (height - bounds.height) * 0.5;
+                    let height = image.height as f32 * (image.height as f32 / bounds.height);
                     Rectangle {
                         x: bounds.x,
-                        y,
+                        y: -(height - (bounds.height / image.height as f32) * height) * offset,
                         width: bounds.width,
                         height,
                     }
-                };
-
-                let width = cover_bounds.width * 4.0;
-                let x = cover_bounds.x - (width - cover_bounds.width) * 0.5;
-
-                Rectangle {
-                    x,
-                    y: cover_bounds.y,
-                    width,
-                    height: cover_bounds.height,
                 }
             }
         }
@@ -535,6 +525,7 @@ impl shader::Primitive for Primitive {
         };
 
         let draw_bounds = state.draw_bounds(self.scale_mode);
+
         let size = Size::from(draw_bounds.size());
         let target_size = Size::from(viewport.logical_size());
         let scale_factor = viewport.scale_factor();
@@ -645,11 +636,34 @@ mod tests {
             },
         };
 
-        let draw = state.draw_bounds(ScaleMode::Cover);
+        let draw = state.draw_bounds(ScaleMode::Cover { offset: 0.5 });
         assert_eq!(draw.width, 400.0);
         assert_eq!(draw.height, 100.0);
-        assert_eq!(draw.x, -140.0);
+        assert_eq!(draw.x, -100.0);
         assert_eq!(draw.y, 20.0);
+    }
+
+    #[test]
+    fn cover_offset_aligns_left_and_right_for_wide_video() {
+        let state = State::Prepared {
+            image_dimensions: Size {
+                width: 200,
+                height: 100,
+            },
+            sampling_factor: 1.0,
+            bounds: Rectangle {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        };
+
+        let left = state.draw_bounds(ScaleMode::Cover { offset: 0.0 });
+        assert_eq!(left.x, 0.0);
+
+        let right = state.draw_bounds(ScaleMode::Cover { offset: 1.0 });
+        assert_eq!(right.x, -200.0);
     }
 
     #[test]
