@@ -21,6 +21,7 @@ const DEFAULT_OPACITY: f32 = 0.5;
 const DEFAULT_OPACITY_TWEEN_DURATION: Duration = Duration::from_millis(180);
 const MIN_REDRAW_INTERVAL: Duration = Duration::from_millis(16);
 const OPACITY_EPSILON: f32 = 0.001;
+static NEXT_RENDER_INSTANCE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ScaleMode {
@@ -223,6 +224,7 @@ struct FrameMetadata {
 
 #[derive(Clone)]
 pub struct Program {
+    render_instance_id: u64,
     scale_mode: ScaleMode,
     data: RefCell<Option<Renderable>>,
     frame_metadata: RefCell<Option<FrameMetadata>>,
@@ -268,6 +270,7 @@ impl Program {
         frame_receiver: Option<Arc<Mutex<mpsc::UnboundedReceiver<Yuv>>>>,
     ) -> Self {
         Self {
+            render_instance_id: NEXT_RENDER_INSTANCE_ID.fetch_add(1, Ordering::Relaxed),
             scale_mode,
             data: RefCell::new(None),
             frame_metadata: RefCell::new(None),
@@ -403,6 +406,7 @@ impl<Message> shader::Program<Message> for Program {
             state: Mutex::new(state),
             opacity: tick.opacity,
             scale_mode: self.scale_mode,
+            render_instance_id: self.render_instance_id,
         }
     }
 }
@@ -412,6 +416,7 @@ pub struct Primitive {
     state: Mutex<State>,
     opacity: f32,
     scale_mode: ScaleMode,
+    render_instance_id: u64,
 }
 
 #[derive(Debug)]
@@ -536,12 +541,14 @@ impl shader::Primitive for Primitive {
 
         match state.deref() {
             State::Pending { yuv, .. } => {
-                if !pipeline.ensure_texture(yuv.dimensions()) {
+                if !pipeline.ensure_texture(self.render_instance_id, yuv.dimensions()) {
                     return;
                 }
-                pipeline.prepare_texture(device, yuv.dimensions());
+                pipeline.prepare_texture(self.render_instance_id, device, yuv.dimensions());
 
                 pipeline.update_uniforms(
+                    self.render_instance_id,
+                    device,
                     queue,
                     &Uniforms::new(
                         size,
@@ -551,8 +558,15 @@ impl shader::Primitive for Primitive {
                         self.opacity,
                     ),
                 );
-                pipeline.update_frame(queue, yuv);
-                pipeline.update_vertices(queue, draw_bounds, target_size, scale_factor);
+                pipeline.update_frame(self.render_instance_id, device, queue, yuv);
+                pipeline.update_vertices(
+                    self.render_instance_id,
+                    device,
+                    queue,
+                    draw_bounds,
+                    target_size,
+                    scale_factor,
+                );
             }
             State::Prepared {
                 image_dimensions,
@@ -560,6 +574,8 @@ impl shader::Primitive for Primitive {
                 ..
             } => {
                 pipeline.update_uniforms(
+                    self.render_instance_id,
+                    device,
                     queue,
                     &Uniforms::new(
                         size,
@@ -569,7 +585,14 @@ impl shader::Primitive for Primitive {
                         self.opacity,
                     ),
                 );
-                pipeline.update_vertices(queue, draw_bounds, target_size, scale_factor);
+                pipeline.update_vertices(
+                    self.render_instance_id,
+                    device,
+                    queue,
+                    draw_bounds,
+                    target_size,
+                    scale_factor,
+                );
             }
             State::Empty { .. } => {}
         }
@@ -592,7 +615,7 @@ impl shader::Primitive for Primitive {
                 return false;
             }
 
-            pipeline.draw(render_pass, state.bounds());
+            pipeline.draw(self.render_instance_id, render_pass, state.bounds());
             true
         } else {
             false

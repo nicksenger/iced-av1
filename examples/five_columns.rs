@@ -1,10 +1,10 @@
 use iced::widget::{container, row, text};
 use iced::{Element, Fill, Subscription, Task};
-use iced_av1::{widget, ScaleMode};
+use iced_av1::{ScaleMode, widget};
 
 const COLUMN_COUNT: usize = 5;
 const JUNGLE_MKV: &[u8] = include_bytes!("../jungle.mkv");
-const JUNGLE2_MKV: &[u8] = include_bytes!("../jungle.mkv");
+const JUNGLE2_MKV: &[u8] = include_bytes!("../jungle2.mkv");
 
 #[derive(Debug, Clone)]
 enum Message {
