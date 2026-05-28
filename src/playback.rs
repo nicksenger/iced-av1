@@ -67,6 +67,18 @@ impl PlaybackController {
             .send(PlaybackCommand::SetStartOffset(timestamp_ns))
             .map_err(|_| PlaybackControlError::WorkerClosed)
     }
+
+    pub fn pause(&self) -> Result<(), PlaybackControlError> {
+        self.tx
+            .send(PlaybackCommand::Pause)
+            .map_err(|_| PlaybackControlError::WorkerClosed)
+    }
+
+    pub fn resume(&self) -> Result<(), PlaybackControlError> {
+        self.tx
+            .send(PlaybackCommand::Resume)
+            .map_err(|_| PlaybackControlError::WorkerClosed)
+    }
 }
 
 pub struct PlaybackSession {
@@ -110,12 +122,15 @@ struct SelectedTracks {
 enum PlaybackCommand {
     SeekTo(u64),
     SetStartOffset(u64),
+    Pause,
+    Resume,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlaybackAction {
     Continue,
     RestartAt(u64),
+    Pause,
 }
 
 struct PlaybackClock {
@@ -233,14 +248,30 @@ fn run_worker(
     let mut loop_index: u64 = 0;
     let mut start_offset_ns = options.start_offset_ns;
     let mut seek_override_ns = Some(start_offset_ns);
+    let mut paused = false;
     loop {
         loop_index = loop_index.saturating_add(1);
 
-        match drain_commands(&mut cmd_rx, &mut start_offset_ns) {
+        match drain_commands(&mut cmd_rx, &mut start_offset_ns, &mut paused) {
             PlaybackAction::Continue => {}
             PlaybackAction::RestartAt(offset_ns) => {
                 seek_override_ns = Some(offset_ns);
             }
+            PlaybackAction::Pause => {}
+        }
+
+        if paused {
+            if !wait_while_paused(
+                &mut cmd_rx,
+                &mut start_offset_ns,
+                &mut seek_override_ns,
+                &mut paused,
+                &tx,
+            ) {
+                break;
+            }
+
+            continue;
         }
 
         debug!(
@@ -256,6 +287,7 @@ fn run_worker(
             &tx,
             &mut cmd_rx,
             &mut start_offset_ns,
+            &mut paused,
         ) {
             Ok(()) => {
                 if tx.is_closed() {
@@ -292,17 +324,24 @@ fn play_media_source(
     tx: &mpsc::UnboundedSender<AvEvent>,
     cmd_rx: &mut mpsc::UnboundedReceiver<PlaybackCommand>,
     default_start_offset_ns: &mut u64,
+    paused: &mut bool,
 ) -> Result<(), AvError> {
     match media_source {
-        MediaSource::File(path) => {
-            play_media_file(path, start_offset_ns, tx, cmd_rx, default_start_offset_ns)
-        }
+        MediaSource::File(path) => play_media_file(
+            path,
+            start_offset_ns,
+            tx,
+            cmd_rx,
+            default_start_offset_ns,
+            paused,
+        ),
         MediaSource::Directory(path) => play_media_file(
             path.join(DEFAULT_MEDIA_FILE_NAME),
             start_offset_ns,
             tx,
             cmd_rx,
             default_start_offset_ns,
+            paused,
         ),
         MediaSource::Bytes(bytes) => {
             let reader = Cursor::new(bytes.as_ref());
@@ -313,6 +352,7 @@ fn play_media_source(
                 tx,
                 cmd_rx,
                 default_start_offset_ns,
+                paused,
             )
         }
     }
@@ -332,6 +372,7 @@ fn play_media_file(
     tx: &mpsc::UnboundedSender<AvEvent>,
     cmd_rx: &mut mpsc::UnboundedReceiver<PlaybackCommand>,
     default_start_offset_ns: &mut u64,
+    paused: &mut bool,
 ) -> Result<(), AvError> {
     let path = path.as_ref();
     let file = File::open(path).map_err(|source| AvError::OpenMedia {
@@ -346,6 +387,7 @@ fn play_media_file(
         tx,
         cmd_rx,
         default_start_offset_ns,
+        paused,
     )
 }
 
@@ -356,6 +398,7 @@ fn play_media<R: Read + Seek>(
     tx: &mpsc::UnboundedSender<AvEvent>,
     cmd_rx: &mut mpsc::UnboundedReceiver<PlaybackCommand>,
     default_start_offset_ns: &mut u64,
+    paused: &mut bool,
 ) -> Result<(), AvError> {
     let mut matroska =
         MatroskaFile::open(reader).map_err(|error| AvError::Demux(error.to_string()))?;
@@ -373,6 +416,7 @@ fn play_media<R: Read + Seek>(
     let mut frame = Frame::default();
     let mut playback_clock = PlaybackClock::new();
     let mut reached_start_offset = start_offset_ns == 0;
+    let mut playback_position_ns = start_offset_ns;
 
     while matroska
         .next_frame(&mut frame)
@@ -382,9 +426,10 @@ fn play_media<R: Read + Seek>(
             return Ok(());
         }
 
-        match drain_commands(cmd_rx, default_start_offset_ns) {
+        match drain_commands(cmd_rx, default_start_offset_ns, paused) {
             PlaybackAction::Continue => {}
             PlaybackAction::RestartAt(offset_ns) => return Err(AvError::SeekRequested(offset_ns)),
+            PlaybackAction::Pause => return Err(AvError::SeekRequested(playback_position_ns)),
         }
 
         if frame.track == tracks.video_track {
@@ -396,6 +441,7 @@ fn play_media<R: Read + Seek>(
                 reached_start_offset = true;
                 playback_clock.set_base_timestamp(timestamp_ns);
             }
+            playback_position_ns = timestamp_ns;
             let frame_duration_ns = frame
                 .duration
                 .map(|duration| duration.saturating_mul(tracks.timestamp_scale_ns))
@@ -409,6 +455,10 @@ fn play_media<R: Read + Seek>(
                 frame_duration_ns,
                 tx,
                 &mut playback_clock,
+                cmd_rx,
+                default_start_offset_ns,
+                paused,
+                &mut playback_position_ns,
             )?;
         }
     }
@@ -420,6 +470,10 @@ fn play_media<R: Read + Seek>(
         tracks
             .video_default_duration_ns
             .unwrap_or(DEFAULT_FRAME_DURATION_NS),
+        cmd_rx,
+        default_start_offset_ns,
+        paused,
+        &mut playback_position_ns,
     )?;
 
     Ok(())
@@ -457,6 +511,10 @@ fn submit_video_packet(
     frame_duration_ns: u64,
     tx: &mpsc::UnboundedSender<AvEvent>,
     playback_clock: &mut PlaybackClock,
+    cmd_rx: &mut mpsc::UnboundedReceiver<PlaybackCommand>,
+    default_start_offset_ns: &mut u64,
+    paused: &mut bool,
+    playback_position_ns: &mut u64,
 ) -> Result<(), AvError> {
     match decoder.send_data(
         data,
@@ -470,13 +528,31 @@ fn submit_video_packet(
         }
     }
 
-    drain_video_decoder(decoder, tx, playback_clock, frame_duration_ns)?;
+    drain_video_decoder(
+        decoder,
+        tx,
+        playback_clock,
+        frame_duration_ns,
+        cmd_rx,
+        default_start_offset_ns,
+        paused,
+        playback_position_ns,
+    )?;
 
     loop {
         match decoder.send_pending_data() {
             Ok(()) => break,
             Err(Av1DecodeError::Again) => {
-                drain_video_decoder(decoder, tx, playback_clock, frame_duration_ns)?;
+                drain_video_decoder(
+                    decoder,
+                    tx,
+                    playback_clock,
+                    frame_duration_ns,
+                    cmd_rx,
+                    default_start_offset_ns,
+                    paused,
+                    playback_position_ns,
+                )?;
             }
             Err(error) => {
                 return Err(AvError::VideoDecoder(error.to_string()));
@@ -484,7 +560,16 @@ fn submit_video_packet(
         }
     }
 
-    drain_video_decoder(decoder, tx, playback_clock, frame_duration_ns)?;
+    drain_video_decoder(
+        decoder,
+        tx,
+        playback_clock,
+        frame_duration_ns,
+        cmd_rx,
+        default_start_offset_ns,
+        paused,
+        playback_position_ns,
+    )?;
 
     Ok(())
 }
@@ -494,8 +579,18 @@ fn drain_video_decoder(
     tx: &mpsc::UnboundedSender<AvEvent>,
     playback_clock: &mut PlaybackClock,
     default_frame_duration_ns: u64,
+    cmd_rx: &mut mpsc::UnboundedReceiver<PlaybackCommand>,
+    default_start_offset_ns: &mut u64,
+    paused: &mut bool,
+    playback_position_ns: &mut u64,
 ) -> Result<(), AvError> {
     loop {
+        match drain_commands(cmd_rx, default_start_offset_ns, paused) {
+            PlaybackAction::Continue => {}
+            PlaybackAction::RestartAt(offset_ns) => return Err(AvError::SeekRequested(offset_ns)),
+            PlaybackAction::Pause => return Err(AvError::SeekRequested(*playback_position_ns)),
+        }
+
         let picture = match decoder.get_picture() {
             Ok(picture) => picture,
             Err(Av1DecodeError::Again) => break,
@@ -512,6 +607,11 @@ fn drain_video_decoder(
             .timestamp()
             .and_then(|timestamp| u64::try_from(timestamp).ok());
         playback_clock.wait_until(timestamp_ns, frame_duration_ns);
+        if let Some(timestamp_ns) = timestamp_ns {
+            *playback_position_ns = timestamp_ns;
+        } else {
+            *playback_position_ns = playback_position_ns.saturating_add(frame_duration_ns.max(1));
+        }
 
         if let Some(yuv) = picture_to_yuv(&picture)
             && tx.send(AvEvent::VideoFrame(yuv)).is_err()
@@ -643,6 +743,7 @@ fn timestamp_ns_to_i64(value: u64) -> i64 {
 fn drain_commands(
     cmd_rx: &mut mpsc::UnboundedReceiver<PlaybackCommand>,
     default_start_offset_ns: &mut u64,
+    paused: &mut bool,
 ) -> PlaybackAction {
     let mut restart_at = None;
 
@@ -654,14 +755,49 @@ fn drain_commands(
             PlaybackCommand::SetStartOffset(offset_ns) => {
                 *default_start_offset_ns = offset_ns;
             }
+            PlaybackCommand::Pause => {
+                *paused = true;
+            }
+            PlaybackCommand::Resume => {
+                *paused = false;
+            }
         }
     }
 
     if let Some(offset_ns) = restart_at {
         PlaybackAction::RestartAt(offset_ns)
+    } else if *paused {
+        PlaybackAction::Pause
     } else {
         PlaybackAction::Continue
     }
+}
+
+fn wait_while_paused(
+    cmd_rx: &mut mpsc::UnboundedReceiver<PlaybackCommand>,
+    default_start_offset_ns: &mut u64,
+    seek_override_ns: &mut Option<u64>,
+    paused: &mut bool,
+    tx: &mpsc::UnboundedSender<AvEvent>,
+) -> bool {
+    while *paused {
+        if tx.is_closed() {
+            return false;
+        }
+
+        match drain_commands(cmd_rx, default_start_offset_ns, paused) {
+            PlaybackAction::Continue | PlaybackAction::Pause => {}
+            PlaybackAction::RestartAt(offset_ns) => {
+                *seek_override_ns = Some(offset_ns);
+            }
+        }
+
+        if *paused {
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    true
 }
 
 pub fn default_media_path() -> Result<PathBuf, AvError> {
@@ -674,4 +810,42 @@ pub fn default_media_path() -> Result<PathBuf, AvError> {
 
 pub fn default_media_source() -> Result<MediaSource, AvError> {
     Ok(MediaSource::File(default_media_path()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn drain_commands_pauses_and_resumes() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut start_offset_ns = 0;
+        let mut paused = false;
+
+        tx.send(PlaybackCommand::Pause).expect("send pause command");
+        let action = drain_commands(&mut rx, &mut start_offset_ns, &mut paused);
+        assert_eq!(action, PlaybackAction::Pause);
+        assert!(paused);
+
+        tx.send(PlaybackCommand::Resume)
+            .expect("send resume command");
+        let action = drain_commands(&mut rx, &mut start_offset_ns, &mut paused);
+        assert_eq!(action, PlaybackAction::Continue);
+        assert!(!paused);
+    }
+
+    #[test]
+    fn drain_commands_keeps_seek_while_paused() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut start_offset_ns = 0;
+        let mut paused = false;
+
+        tx.send(PlaybackCommand::Pause).expect("send pause command");
+        tx.send(PlaybackCommand::SeekTo(42))
+            .expect("send seek command");
+        let action = drain_commands(&mut rx, &mut start_offset_ns, &mut paused);
+
+        assert_eq!(action, PlaybackAction::RestartAt(42));
+        assert!(paused);
+    }
 }

@@ -1,9 +1,11 @@
 use iced::widget::{container, row, text};
 use iced::{Element, Fill, Subscription, Task};
-use iced_av1::{ScaleMode, widget};
+use iced_av1::{widget, ScaleMode};
 
 const COLUMN_COUNT: usize = 5;
+const COVER_OFFSETS: [f32; COLUMN_COUNT] = [0.0, 0.25, 0.5, 0.75, 1.0];
 const JUNGLE_MKV: &[u8] = include_bytes!("../jungle.mkv");
+const JUNGLE2_MKV: &[u8] = include_bytes!("../jungle2.mkv");
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -25,8 +27,13 @@ fn main() -> iced::Result {
 fn init() -> (App, Task<Message>) {
     let mut players = Vec::with_capacity(COLUMN_COUNT);
 
-    for _ in 0..COLUMN_COUNT {
-        let mut state = match widget::State::new_with_media_bytes(JUNGLE_MKV.to_vec()) {
+    for (i, offset) in COVER_OFFSETS.iter().copied().enumerate() {
+        let video = if i % 2 == 0 { JUNGLE_MKV } else { JUNGLE2_MKV };
+        let mut state = match widget::State::new_with_media_source_and_opacity_options(
+            iced_av1::MediaSource::Bytes(video.into()),
+            iced_av1::PlaybackOptions { start_offset_ns: 0 },
+            Default::default(),
+        ) {
             Ok(state) => state,
             Err(error) => {
                 return (
@@ -38,7 +45,7 @@ fn init() -> (App, Task<Message>) {
                 );
             }
         };
-        state.set_scale_mode(ScaleMode::Cover);
+        state.set_scale_mode(ScaleMode::Cover { offset });
         players.push(state);
     }
 

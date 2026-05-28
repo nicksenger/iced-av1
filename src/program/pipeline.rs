@@ -4,6 +4,7 @@ use iced::{
     Rectangle,
     wgpu::util::{BufferInitDescriptor, DeviceExt},
 };
+use std::collections::HashMap;
 
 mod instance;
 mod uniforms;
@@ -19,25 +20,23 @@ struct TextureState {
     bind_group: wgpu::BindGroup,
 }
 
-pub struct Pipeline {
-    pipeline: wgpu::RenderPipeline,
+struct InstanceState {
     uniforms_buffer: wgpu::Buffer,
     uniform_bind_group: wgpu::BindGroup,
-    texture_bind_group_layout: wgpu::BindGroupLayout,
     vertex_buffer: wgpu::Buffer,
     scale_factor: f32,
     texture: Option<TextureState>,
 }
 
+pub struct Pipeline {
+    pipeline: wgpu::RenderPipeline,
+    uniform_bind_group_layout: wgpu::BindGroupLayout,
+    texture_bind_group_layout: wgpu::BindGroupLayout,
+    instances: HashMap<u64, InstanceState>,
+}
+
 impl shader::Pipeline for Pipeline {
     fn new(device: &wgpu::Device, _queue: &wgpu::Queue, format: wgpu::TextureFormat) -> Self {
-        let uniforms_buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("yuv uniform buffer"),
-            size: std::mem::size_of::<Uniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
         let uniform_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("yuv uniform bind group layout"),
@@ -54,19 +53,6 @@ impl shader::Pipeline for Pipeline {
                     count: None,
                 }],
             });
-
-        let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("yuv uniform bind group"),
-            layout: &uniform_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                    buffer: &uniforms_buffer,
-                    offset: 0,
-                    size: None,
-                }),
-            }],
-        });
 
         let texture_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -149,33 +135,70 @@ impl shader::Pipeline for Pipeline {
             cache: None,
         });
 
-        let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
-            label: Some("yuv vertex buffer"),
-            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
-            contents: bytemuck::cast_slice(&Instance::frame(
-                Rectangle::new(iced::Point::ORIGIN, iced::Size::new(1.0, 1.0)),
-                Size {
-                    width: 1.0,
-                    height: 1.0,
-                },
-            )),
-        });
-
         Self {
             pipeline,
-            uniforms_buffer,
-            uniform_bind_group,
+            uniform_bind_group_layout,
             texture_bind_group_layout,
-            vertex_buffer,
-            scale_factor: 1.0,
-            texture: None,
+            instances: HashMap::new(),
         }
     }
 }
 
 impl Pipeline {
-    fn recreate_texture_if_needed(&mut self, device: &wgpu::Device, image_dimensions: Size<u32>) {
-        if self.texture.as_ref().is_some_and(|texture| {
+    fn state_mut(&mut self, instance_id: u64, device: &wgpu::Device) -> &mut InstanceState {
+        self.instances.entry(instance_id).or_insert_with(|| {
+            let uniforms_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("yuv uniform buffer"),
+                size: std::mem::size_of::<Uniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+
+            let uniform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("yuv uniform bind group"),
+                layout: &self.uniform_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &uniforms_buffer,
+                        offset: 0,
+                        size: None,
+                    }),
+                }],
+            });
+
+            let vertex_buffer = device.create_buffer_init(&BufferInitDescriptor {
+                label: Some("yuv vertex buffer"),
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                contents: bytemuck::cast_slice(&Instance::frame(
+                    Rectangle::new(iced::Point::ORIGIN, iced::Size::new(1.0, 1.0)),
+                    Size {
+                        width: 1.0,
+                        height: 1.0,
+                    },
+                )),
+            });
+
+            InstanceState {
+                uniforms_buffer,
+                uniform_bind_group,
+                vertex_buffer,
+                scale_factor: 1.0,
+                texture: None,
+            }
+        })
+    }
+
+    fn recreate_texture_if_needed(
+        &mut self,
+        instance_id: u64,
+        device: &wgpu::Device,
+        image_dimensions: Size<u32>,
+    ) {
+        let texture_bind_group_layout = self.texture_bind_group_layout.clone();
+        let state = self.state_mut(instance_id, device);
+
+        if state.texture.as_ref().is_some_and(|texture| {
             texture.dimensions.width == image_dimensions.width
                 && texture.dimensions.height == image_dimensions.height
         }) {
@@ -216,7 +239,7 @@ impl Pipeline {
         });
 
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            layout: &self.texture_bind_group_layout,
+            layout: &texture_bind_group_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -230,14 +253,18 @@ impl Pipeline {
             label: Some("yuv texture bind group"),
         });
 
-        self.texture = Some(TextureState {
+        state.texture = Some(TextureState {
             dimensions: image_dimensions,
             texture,
             bind_group,
         });
     }
 
-    pub(crate) fn ensure_texture(&mut self, image_dimensions: Size<u32>) -> bool {
+    pub(crate) fn ensure_texture(
+        &mut self,
+        _instance_id: u64,
+        image_dimensions: Size<u32>,
+    ) -> bool {
         if image_dimensions.width == 0 || image_dimensions.height == 0 {
             return false;
         }
@@ -245,12 +272,26 @@ impl Pipeline {
         true
     }
 
-    pub(crate) fn update_uniforms(&mut self, queue: &wgpu::Queue, uniforms: &Uniforms) {
-        queue.write_buffer(&self.uniforms_buffer, 0, bytemuck::bytes_of(uniforms));
+    pub(crate) fn update_uniforms(
+        &mut self,
+        instance_id: u64,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        uniforms: &Uniforms,
+    ) {
+        let state = self.state_mut(instance_id, device);
+        queue.write_buffer(&state.uniforms_buffer, 0, bytemuck::bytes_of(uniforms));
     }
 
-    pub(crate) fn update_frame(&mut self, queue: &wgpu::Queue, yuv: &Renderable) {
-        let Some(texture_state) = self.texture.as_ref() else {
+    pub(crate) fn update_frame(
+        &mut self,
+        instance_id: u64,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        yuv: &Renderable,
+    ) {
+        let state = self.state_mut(instance_id, device);
+        let Some(texture_state) = state.texture.as_ref() else {
             return;
         };
 
@@ -328,39 +369,56 @@ impl Pipeline {
 
     pub(crate) fn update_vertices(
         &mut self,
+        instance_id: u64,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         bounds: Rectangle,
         target_size: Size,
         scale_factor: f32,
     ) {
-        self.scale_factor = scale_factor;
+        let state = self.state_mut(instance_id, device);
+        state.scale_factor = scale_factor;
         queue.write_buffer(
-            &self.vertex_buffer,
+            &state.vertex_buffer,
             0,
             bytemuck::bytes_of(&Instance::frame(bounds, target_size)),
         );
     }
 
-    pub(crate) fn draw(&self, render_pass: &mut wgpu::RenderPass<'_>, bounds: Rectangle) {
-        let Some(texture_state) = self.texture.as_ref() else {
+    pub(crate) fn draw(
+        &self,
+        instance_id: u64,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        bounds: Rectangle,
+    ) {
+        let Some(state) = self.instances.get(&instance_id) else {
+            return;
+        };
+
+        let Some(texture_state) = state.texture.as_ref() else {
             return;
         };
 
         render_pass.set_scissor_rect(
-            (bounds.x * self.scale_factor) as u32,
-            (bounds.y * self.scale_factor) as u32,
-            (bounds.width * self.scale_factor) as u32,
-            (bounds.height * self.scale_factor) as u32,
+            (bounds.x * state.scale_factor) as u32,
+            (bounds.y * state.scale_factor) as u32,
+            (bounds.width * state.scale_factor) as u32,
+            (bounds.height * state.scale_factor) as u32,
         );
 
-        render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        render_pass.set_vertex_buffer(0, state.vertex_buffer.slice(..));
         render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.uniform_bind_group, &[]);
+        render_pass.set_bind_group(0, &state.uniform_bind_group, &[]);
         render_pass.set_bind_group(1, &texture_state.bind_group, &[]);
         render_pass.draw(0..6, 0..1);
     }
 
-    pub(crate) fn prepare_texture(&mut self, device: &wgpu::Device, image_dimensions: Size<u32>) {
-        self.recreate_texture_if_needed(device, image_dimensions);
+    pub(crate) fn prepare_texture(
+        &mut self,
+        instance_id: u64,
+        device: &wgpu::Device,
+        image_dimensions: Size<u32>,
+    ) {
+        self.recreate_texture_if_needed(instance_id, device, image_dimensions);
     }
 }

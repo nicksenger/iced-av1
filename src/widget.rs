@@ -1,7 +1,7 @@
 use futures_lite::stream;
 use iced::widget::shader;
 use iced::{Element, Fill, Subscription};
-use iced_futures::subscription::{EventStream, Hasher, Recipe, from_recipe, into_recipes};
+use iced_futures::subscription::{from_recipe, into_recipes, EventStream, Hasher, Recipe};
 use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
@@ -9,30 +9,30 @@ use std::any::TypeId;
 use std::collections::HashMap;
 use std::hash::Hash as _;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
+use std::thread;
 
 use crate::{
-    AvError, AvEvent, MediaSource, PlaybackControlError, PlaybackController, PlaybackOptions,
-    Program, ScaleMode, Yuv, default_media_source, spawn_session_with_source_and_options,
+    default_media_source, spawn_session_with_source_and_options, AvError, AvEvent, MediaSource,
+    OpacityController, OpacityOptions, OpacityTween, PlaybackControlError, PlaybackController,
+    PlaybackOptions, Program, ScaleMode,
 };
-use crate::{OpacityController, OpacityOptions, OpacityTween};
 
 static NEXT_SUBSCRIPTION_ID: AtomicU64 = AtomicU64::new(1);
 static AV_EVENT_RXS: OnceLock<
-    Mutex<HashMap<u64, Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AvEvent>>>>>,
+    Mutex<HashMap<u64, Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Message>>>>>,
 > = OnceLock::new();
 
 #[derive(Debug, Clone)]
 pub enum Message {
-    Frame(Yuv),
     Ended,
     Error(String),
 }
 
 pub struct State {
-    program: Option<Program>,
+    program: Program,
     controller: PlaybackController,
     opacity: OpacityController,
     scale_mode: ScaleMode,
@@ -73,34 +73,32 @@ impl State {
         opacity_options: OpacityOptions,
     ) -> Result<Self, AvError> {
         let session = spawn_session_with_source_and_options(media_source, playback_options);
-        let receiver = Arc::new(tokio::sync::Mutex::new(session.events));
+        let (frame_tx, frame_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::unbounded_channel();
+
+        spawn_event_router(session.events, frame_tx, event_tx);
+
+        let event_receiver = Arc::new(tokio::sync::Mutex::new(event_rx));
+        let frame_receiver = Arc::new(Mutex::new(frame_rx));
+
         let subscription_id = NEXT_SUBSCRIPTION_ID.fetch_add(1, Ordering::Relaxed);
         let mut receivers = receiver_map().lock().expect("AV receiver map poisoned");
-        receivers.insert(subscription_id, receiver.clone());
+        receivers.insert(subscription_id, event_receiver);
+
         let opacity = OpacityController::new(opacity_options);
+        let scale_mode = ScaleMode::default();
 
         Ok(Self {
-            program: None,
+            program: Program::new_with_frame_receiver(frame_receiver, opacity.clone(), scale_mode),
             controller: session.controller,
             opacity,
-            scale_mode: ScaleMode::default(),
+            scale_mode,
             subscription_id,
         })
     }
 
     pub fn update(&mut self, message: Message) {
         match message {
-            Message::Frame(frame) => {
-                if let Some(program) = self.program.as_mut() {
-                    program.update_frame(frame);
-                } else {
-                    self.program = Some(Program::new_with_opacity_and_scale_mode(
-                        frame,
-                        self.opacity.clone(),
-                        self.scale_mode,
-                    ));
-                }
-            }
             Message::Ended => {
                 debug!("AV playback finished");
             }
@@ -114,8 +112,7 @@ impl State {
         &'a self,
         map: fn(Message) -> MessageT,
     ) -> Option<Element<'a, MessageT>> {
-        let program = self.program.as_ref()?;
-        let overlay: Element<'_, Message> = shader(program).width(Fill).height(Fill).into();
+        let overlay: Element<'_, Message> = shader(&self.program).width(Fill).height(Fill).into();
         Some(overlay.map(map))
     }
 
@@ -123,8 +120,8 @@ impl State {
         &self,
         map: fn(Message) -> MessageT,
     ) -> Option<Element<'static, MessageT>> {
-        let program = self.program.as_ref()?.clone();
-        let overlay: Element<'static, Message> = shader(program).width(Fill).height(Fill).into();
+        let overlay: Element<'static, Message> =
+            shader(self.program.clone()).width(Fill).height(Fill).into();
         Some(overlay.map(map))
     }
 
@@ -144,6 +141,14 @@ impl State {
 
     pub fn set_start_offset(&self, timestamp_ns: u64) -> Result<(), PlaybackControlError> {
         self.controller.set_start_offset(timestamp_ns)
+    }
+
+    pub fn pause(&self) -> Result<(), PlaybackControlError> {
+        self.controller.pause()
+    }
+
+    pub fn resume(&self) -> Result<(), PlaybackControlError> {
+        self.controller.resume()
     }
 
     pub fn controller(&self) -> PlaybackController {
@@ -176,10 +181,7 @@ impl State {
 
     pub fn set_scale_mode(&mut self, scale_mode: ScaleMode) {
         self.scale_mode = scale_mode;
-
-        if let Some(program) = self.program.as_mut() {
-            program.set_scale_mode(scale_mode);
-        }
+        self.program.set_scale_mode(scale_mode);
     }
 }
 
@@ -189,6 +191,38 @@ impl Drop for State {
             receivers.remove(&self.subscription_id);
         }
     }
+}
+
+fn spawn_event_router(
+    mut events: mpsc::UnboundedReceiver<AvEvent>,
+    frame_tx: mpsc::UnboundedSender<crate::Yuv>,
+    event_tx: mpsc::UnboundedSender<Message>,
+) {
+    thread::Builder::new()
+        .name(String::from("iced-av1-event-router"))
+        .spawn(move || {
+            while let Some(event) = events.blocking_recv() {
+                match event {
+                    AvEvent::VideoFrame(frame) => {
+                        let _ = frame_tx.send(frame);
+                    }
+                    AvEvent::PlaybackEnded => {
+                        let _ = event_tx.send(Message::Ended);
+                    }
+                    AvEvent::PlaybackError(error) => {
+                        let _ = event_tx.send(Message::Error(error));
+                    }
+                }
+
+                if frame_tx.is_closed() && event_tx.is_closed() {
+                    break;
+                }
+            }
+        })
+        .map_err(|error| {
+            warn!(%error, "failed to spawn AV event router thread");
+        })
+        .ok();
 }
 
 fn map_subscription<T: 'static, U: 'static, Mapper>(
@@ -237,8 +271,8 @@ where
     }))
 }
 
-fn receiver_map()
--> &'static Mutex<HashMap<u64, Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<AvEvent>>>>> {
+fn receiver_map(
+) -> &'static Mutex<HashMap<u64, Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<Message>>>>> {
     AV_EVENT_RXS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -253,12 +287,6 @@ fn av_event_stream(subscription_id: &u64) -> futures_lite::stream::Boxed<Message
         let mut guard = receiver.lock().await;
         let event = guard.recv().await?;
 
-        let message = match event {
-            AvEvent::VideoFrame(frame) => Message::Frame(frame),
-            AvEvent::PlaybackEnded => Message::Ended,
-            AvEvent::PlaybackError(error) => Message::Error(error),
-        };
-
-        Some((message, ()))
+        Some((event, ()))
     }))
 }
