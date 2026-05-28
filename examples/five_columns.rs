@@ -1,9 +1,10 @@
 use iced::widget::{container, row, text};
 use iced::{Element, Fill, Subscription, Task};
-use iced_av1::{ScaleMode, widget};
+use iced_av1::{widget, ScaleMode};
 
 const COLUMN_COUNT: usize = 5;
 const JUNGLE_MKV: &[u8] = include_bytes!("../jungle.mkv");
+const JUNGLE2_MKV: &[u8] = include_bytes!("../jungle.mkv");
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -25,8 +26,13 @@ fn main() -> iced::Result {
 fn init() -> (App, Task<Message>) {
     let mut players = Vec::with_capacity(COLUMN_COUNT);
 
-    for _ in 0..COLUMN_COUNT {
-        let mut state = match widget::State::new_with_media_bytes(JUNGLE_MKV.to_vec()) {
+    for i in 0..COLUMN_COUNT {
+        let video = if i % 2 == 0 {
+            JUNGLE_MKV.to_vec()
+        } else {
+            JUNGLE2_MKV.to_vec()
+        };
+        let mut state = match widget::State::new_with_media_bytes(video) {
             Ok(state) => state,
             Err(error) => {
                 return (
