@@ -489,17 +489,21 @@ impl State {
 
                 if image_aspect > container_aspect {
                     let width = image.width as f32 * (image.width as f32 / bounds.width);
+                    let horizontal_overflow = width - (bounds.width / image.width as f32) * width;
+                    let (x, width) = apply_cover_offset(offset, width, horizontal_overflow);
                     Rectangle {
-                        x: -(width - (bounds.width / image.width as f32) * width) * offset,
+                        x,
                         y: bounds.y,
                         width,
                         height: bounds.height,
                     }
                 } else {
                     let height = image.height as f32 * (image.height as f32 / bounds.height);
+                    let vertical_overflow = height - (bounds.height / image.height as f32) * height;
+                    let (y, height) = apply_cover_offset(offset, height, vertical_overflow);
                     Rectangle {
                         x: bounds.x,
-                        y: -(height - (bounds.height / image.height as f32) * height) * offset,
+                        y,
                         width: bounds.width,
                         height,
                     }
@@ -507,6 +511,18 @@ impl State {
             }
         }
     }
+}
+
+fn apply_cover_offset(offset: f32, size: f32, overflow: f32) -> (f32, f32) {
+    let mut origin = -overflow * offset.abs();
+    let mut size = size;
+
+    if offset < 0.0 {
+        origin += size;
+        size = -size;
+    }
+
+    (origin, size)
 }
 
 impl shader::Primitive for Primitive {
@@ -664,6 +680,54 @@ mod tests {
 
         let right = state.draw_bounds(ScaleMode::Cover { offset: 1.0 });
         assert_eq!(right.x, -200.0);
+    }
+
+    #[test]
+    fn negative_cover_offset_flips_horizontally_when_width_is_cropped() {
+        let state = State::Prepared {
+            image_dimensions: Size {
+                width: 200,
+                height: 100,
+            },
+            sampling_factor: 1.0,
+            bounds: Rectangle {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        };
+
+        let normal = state.draw_bounds(ScaleMode::Cover { offset: 0.5 });
+        let inverted = state.draw_bounds(ScaleMode::Cover { offset: -0.5 });
+
+        assert_eq!(normal.width, 400.0);
+        assert_eq!(inverted.width, -normal.width);
+        assert_eq!(inverted.x, normal.x + normal.width);
+    }
+
+    #[test]
+    fn negative_cover_offset_flips_vertically_when_height_is_cropped() {
+        let state = State::Prepared {
+            image_dimensions: Size {
+                width: 100,
+                height: 200,
+            },
+            sampling_factor: 1.0,
+            bounds: Rectangle {
+                x: 10.0,
+                y: 20.0,
+                width: 100.0,
+                height: 100.0,
+            },
+        };
+
+        let normal = state.draw_bounds(ScaleMode::Cover { offset: 0.5 });
+        let inverted = state.draw_bounds(ScaleMode::Cover { offset: -0.5 });
+
+        assert_eq!(normal.height, 400.0);
+        assert_eq!(inverted.height, -normal.height);
+        assert_eq!(inverted.y, normal.y + normal.height);
     }
 
     #[test]
