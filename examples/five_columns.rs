@@ -3,7 +3,7 @@ use iced::{Element, Fill, Subscription, Task};
 use iced_av1::{widget, ScaleMode};
 
 const COLUMN_COUNT: usize = 5;
-const COVER_OFFSETS: [f32; COLUMN_COUNT] = [0.0, 0.25, 0.5, 0.75, 1.0];
+const COVER_OFFSETS: [f32; COLUMN_COUNT] = [-1.0, -0.5, 0.0, 0.5, 1.0];
 const JUNGLE_MKV: &[u8] = include_bytes!("../jungle.mkv");
 const JUNGLE2_MKV: &[u8] = include_bytes!("../jungle2.mkv");
 
