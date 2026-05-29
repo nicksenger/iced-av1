@@ -2,7 +2,7 @@ use iced::widget::{container, row, text};
 use iced::{Element, Fill, Subscription, Task};
 use iced_av1::{widget, MediaSource, ScaleMode};
 
-const VIDEO_BYTES: &[u8] = include_bytes!("../jungle.mkv");
+const VIDEO_BYTES: &[u8] = include_bytes!("../chimp.mkv");
 const SEEK_OFFSET_NS: u64 = 2_000_000_000;
 
 #[derive(Debug, Clone)]
