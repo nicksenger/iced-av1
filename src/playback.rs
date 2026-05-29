@@ -434,13 +434,6 @@ fn play_media<R: Read + Seek>(
 
         if frame.track == tracks.video_track {
             let timestamp_ns = frame.timestamp.saturating_mul(tracks.timestamp_scale_ns);
-            if !reached_start_offset {
-                if timestamp_ns < start_offset_ns {
-                    continue;
-                }
-                reached_start_offset = true;
-                playback_clock.set_base_timestamp(timestamp_ns);
-            }
             playback_position_ns = timestamp_ns;
             let frame_duration_ns = frame
                 .duration
@@ -459,6 +452,8 @@ fn play_media<R: Read + Seek>(
                 default_start_offset_ns,
                 paused,
                 &mut playback_position_ns,
+                start_offset_ns,
+                &mut reached_start_offset,
             )?;
         }
     }
@@ -474,6 +469,8 @@ fn play_media<R: Read + Seek>(
         default_start_offset_ns,
         paused,
         &mut playback_position_ns,
+        start_offset_ns,
+        &mut reached_start_offset,
     )?;
 
     Ok(())
@@ -515,6 +512,8 @@ fn submit_video_packet(
     default_start_offset_ns: &mut u64,
     paused: &mut bool,
     playback_position_ns: &mut u64,
+    start_offset_ns: u64,
+    reached_start_offset: &mut bool,
 ) -> Result<(), AvError> {
     match decoder.send_data(
         data,
@@ -537,6 +536,8 @@ fn submit_video_packet(
         default_start_offset_ns,
         paused,
         playback_position_ns,
+        start_offset_ns,
+        reached_start_offset,
     )?;
 
     loop {
@@ -552,6 +553,8 @@ fn submit_video_packet(
                     default_start_offset_ns,
                     paused,
                     playback_position_ns,
+                    start_offset_ns,
+                    reached_start_offset,
                 )?;
             }
             Err(error) => {
@@ -569,6 +572,8 @@ fn submit_video_packet(
         default_start_offset_ns,
         paused,
         playback_position_ns,
+        start_offset_ns,
+        reached_start_offset,
     )?;
 
     Ok(())
@@ -583,6 +588,8 @@ fn drain_video_decoder(
     default_start_offset_ns: &mut u64,
     paused: &mut bool,
     playback_position_ns: &mut u64,
+    start_offset_ns: u64,
+    reached_start_offset: &mut bool,
 ) -> Result<(), AvError> {
     loop {
         match drain_commands(cmd_rx, default_start_offset_ns, paused) {
@@ -606,12 +613,30 @@ fn drain_video_decoder(
         let timestamp_ns = picture
             .timestamp()
             .and_then(|timestamp| u64::try_from(timestamp).ok());
-        playback_clock.wait_until(timestamp_ns, frame_duration_ns);
-        if let Some(timestamp_ns) = timestamp_ns {
-            *playback_position_ns = timestamp_ns;
+
+        let next_playback_position_ns = if let Some(timestamp_ns) = timestamp_ns {
+            timestamp_ns
         } else {
-            *playback_position_ns = playback_position_ns.saturating_add(frame_duration_ns.max(1));
+            playback_position_ns.saturating_add(frame_duration_ns.max(1))
+        };
+
+        if !*reached_start_offset {
+            let should_start = timestamp_ns
+                .map(|timestamp_ns| timestamp_ns >= start_offset_ns)
+                .unwrap_or(*playback_position_ns >= start_offset_ns);
+
+            if !should_start {
+                *playback_position_ns = next_playback_position_ns;
+                continue;
+            }
+
+            let base_timestamp_ns = timestamp_ns.unwrap_or(*playback_position_ns);
+            playback_clock.set_base_timestamp(base_timestamp_ns);
+            *reached_start_offset = true;
         }
+
+        playback_clock.wait_until(timestamp_ns, frame_duration_ns);
+        *playback_position_ns = next_playback_position_ns;
 
         if let Some(yuv) = picture_to_yuv(&picture)
             && tx.send(AvEvent::VideoFrame(yuv)).is_err()
