@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use iced::mouse;
 use iced::widget::shader;
-use iced::{wgpu, window, Rectangle};
+use iced::{Rectangle, wgpu, window};
 use tokio::sync::mpsc;
 
 use pipeline::Pipeline;
