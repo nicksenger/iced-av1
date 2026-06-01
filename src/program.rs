@@ -21,6 +21,7 @@ const DEFAULT_OPACITY: f32 = 0.5;
 const DEFAULT_OPACITY_TWEEN_DURATION: Duration = Duration::from_millis(180);
 const MIN_REDRAW_INTERVAL: Duration = Duration::from_millis(16);
 const OPACITY_EPSILON: f32 = 0.001;
+const COVER_REFERENCE_HEIGHT: f32 = 720.0;
 static NEXT_RENDER_INSTANCE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -222,6 +223,7 @@ fn ease_out_cubic(t: f32) -> f32 {
 struct FrameMetadata {
     dimensions: Size<u32>,
     sampling_factor: f32,
+    display_aspect_ratio: f32,
 }
 
 #[derive(Clone)]
@@ -291,6 +293,7 @@ impl Program {
         *self.frame_metadata.borrow_mut() = Some(FrameMetadata {
             dimensions: renderable.dimensions(),
             sampling_factor: renderable.downsampling_factor(),
+            display_aspect_ratio: renderable.display_aspect_ratio(),
         });
         *self.data.borrow_mut() = Some(renderable);
     }
@@ -399,6 +402,7 @@ impl<Message> shader::Program<Message> for Program {
                     bounds,
                     image_dimensions: meta.dimensions,
                     sampling_factor: meta.sampling_factor,
+                    display_aspect_ratio: meta.display_aspect_ratio,
                 },
                 None => State::Empty { bounds },
             },
@@ -430,6 +434,7 @@ enum State {
     Prepared {
         image_dimensions: Size<u32>,
         sampling_factor: f32,
+        display_aspect_ratio: f32,
         bounds: Rectangle,
     },
     Empty {
@@ -459,6 +464,17 @@ impl State {
         }
     }
 
+    fn display_aspect_ratio(&self) -> f32 {
+        match self {
+            Self::Prepared {
+                display_aspect_ratio,
+                ..
+            } => *display_aspect_ratio,
+            Self::Pending { yuv, .. } => yuv.display_aspect_ratio(),
+            Self::Empty { .. } => 1.0,
+        }
+    }
+
     fn sampling_factor(&self) -> f32 {
         match self {
             Self::Prepared {
@@ -484,12 +500,13 @@ impl State {
                     return bounds;
                 }
 
+                let image = normalize_cover_dimensions(self.display_aspect_ratio());
                 let container_aspect = bounds.width / bounds.height;
-                let image_aspect = image.width as f32 / image.height as f32;
+                let image_aspect = image.width / image.height;
 
                 if image_aspect > container_aspect {
-                    let width = image.width as f32 * (image.width as f32 / bounds.width);
-                    let horizontal_overflow = width - (bounds.width / image.width as f32) * width;
+                    let width = image.width * (image.width / bounds.width);
+                    let horizontal_overflow = width - (bounds.width / image.width) * width;
                     let (x, width) = apply_cover_offset(offset, width, horizontal_overflow);
                     Rectangle {
                         x,
@@ -498,8 +515,8 @@ impl State {
                         height: bounds.height,
                     }
                 } else {
-                    let height = image.height as f32 * (image.height as f32 / bounds.height);
-                    let vertical_overflow = height - (bounds.height / image.height as f32) * height;
+                    let height = image.height * (image.height / bounds.height);
+                    let vertical_overflow = height - (bounds.height / image.height) * height;
                     let (y, height) = apply_cover_offset(offset, height, vertical_overflow);
                     Rectangle {
                         x: bounds.x,
@@ -523,6 +540,18 @@ fn apply_cover_offset(offset: f32, size: f32, overflow: f32) -> (f32, f32) {
     }
 
     (origin, size)
+}
+
+fn normalize_cover_dimensions(display_aspect_ratio: f32) -> Size {
+    let aspect_ratio = if display_aspect_ratio > 0.0 {
+        display_aspect_ratio
+    } else {
+        1.0
+    };
+    Size {
+        width: aspect_ratio * COVER_REFERENCE_HEIGHT,
+        height: COVER_REFERENCE_HEIGHT,
+    }
 }
 
 impl shader::Primitive for Primitive {
@@ -612,6 +641,7 @@ impl shader::Primitive for Primitive {
                 bounds: state.bounds(),
                 image_dimensions: state.image_dimensions(),
                 sampling_factor: state.sampling_factor(),
+                display_aspect_ratio: state.display_aspect_ratio(),
             },
         };
     }
@@ -644,6 +674,7 @@ mod tests {
                 height: 100,
             },
             sampling_factor: 1.0,
+            display_aspect_ratio: 2.0,
             bounds: Rectangle {
                 x: 10.0,
                 y: 20.0,
@@ -653,9 +684,9 @@ mod tests {
         };
 
         let draw = state.draw_bounds(ScaleMode::Cover { offset: 0.5 });
-        assert_eq!(draw.width, 400.0);
+        assert_eq!(draw.width, 20736.0);
         assert_eq!(draw.height, 100.0);
-        assert_eq!(draw.x, -100.0);
+        assert_eq!(draw.x, -9648.0);
         assert_eq!(draw.y, 20.0);
     }
 
@@ -667,6 +698,7 @@ mod tests {
                 height: 100,
             },
             sampling_factor: 1.0,
+            display_aspect_ratio: 2.0,
             bounds: Rectangle {
                 x: 10.0,
                 y: 20.0,
@@ -679,7 +711,7 @@ mod tests {
         assert_eq!(left.x, 0.0);
 
         let right = state.draw_bounds(ScaleMode::Cover { offset: 1.0 });
-        assert_eq!(right.x, -200.0);
+        assert_eq!(right.x, -19296.0);
     }
 
     #[test]
@@ -690,6 +722,7 @@ mod tests {
                 height: 100,
             },
             sampling_factor: 1.0,
+            display_aspect_ratio: 2.0,
             bounds: Rectangle {
                 x: 10.0,
                 y: 20.0,
@@ -701,7 +734,7 @@ mod tests {
         let normal = state.draw_bounds(ScaleMode::Cover { offset: 0.5 });
         let inverted = state.draw_bounds(ScaleMode::Cover { offset: -0.5 });
 
-        assert_eq!(normal.width, 400.0);
+        assert_eq!(normal.width, 20736.0);
         assert_eq!(inverted.width, -normal.width);
         assert_eq!(inverted.x, normal.x + normal.width);
     }
@@ -714,6 +747,7 @@ mod tests {
                 height: 200,
             },
             sampling_factor: 1.0,
+            display_aspect_ratio: 0.5,
             bounds: Rectangle {
                 x: 10.0,
                 y: 20.0,
@@ -725,9 +759,47 @@ mod tests {
         let normal = state.draw_bounds(ScaleMode::Cover { offset: 0.5 });
         let inverted = state.draw_bounds(ScaleMode::Cover { offset: -0.5 });
 
-        assert_eq!(normal.height, 400.0);
+        assert_eq!(normal.height, 5184.0);
         assert_eq!(inverted.height, -normal.height);
         assert_eq!(inverted.y, normal.y + normal.height);
+    }
+
+    #[test]
+    fn cover_normalization_aligns_480p_with_720p() {
+        let bounds = Rectangle {
+            x: 0.0,
+            y: 0.0,
+            width: 100.0,
+            height: 100.0,
+        };
+
+        let hd = State::Prepared {
+            image_dimensions: Size {
+                width: 1280,
+                height: 720,
+            },
+            sampling_factor: 1.0,
+            display_aspect_ratio: 16.0 / 9.0,
+            bounds,
+        };
+        let sd = State::Prepared {
+            image_dimensions: Size {
+                width: 854,
+                height: 480,
+            },
+            sampling_factor: 1.0,
+            display_aspect_ratio: 16.0 / 9.0,
+            bounds,
+        };
+
+        let hd_draw = hd.draw_bounds(ScaleMode::Cover { offset: 0.5 });
+        let sd_draw = sd.draw_bounds(ScaleMode::Cover { offset: 0.5 });
+
+        let epsilon = 1e-4;
+        assert!((hd_draw.width - sd_draw.width).abs() < epsilon);
+        assert!((hd_draw.height - sd_draw.height).abs() < epsilon);
+        assert!((hd_draw.x - sd_draw.x).abs() < epsilon);
+        assert!((hd_draw.y - sd_draw.y).abs() < epsilon);
     }
 
     #[test]
@@ -739,6 +811,7 @@ mod tests {
                     width: 1,
                     height: 1,
                 },
+                display_aspect_ratio: 1.0,
             },
             bounds: Rectangle {
                 x: 1.0,
