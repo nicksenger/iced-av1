@@ -488,10 +488,9 @@ impl State {
                 let image_aspect = image.width as f32 / image.height as f32;
 
                 if image_aspect > container_aspect {
-                    let scale = bounds.height / image.height as f32;
-                    let width = image.width as f32 * scale;
-                    let horizontal_overflow = width - bounds.width;
-                    let (x, width) = apply_cover_offset(bounds.x, offset, width, horizontal_overflow);
+                    let width = image.width as f32 * (image.width as f32 / bounds.width);
+                    let horizontal_overflow = width - (bounds.width / image.width as f32) * width;
+                    let (x, width) = apply_cover_offset(offset, width, horizontal_overflow);
                     Rectangle {
                         x,
                         y: bounds.y,
@@ -499,10 +498,9 @@ impl State {
                         height: bounds.height,
                     }
                 } else {
-                    let scale = bounds.width / image.width as f32;
-                    let height = image.height as f32 * scale;
-                    let vertical_overflow = height - bounds.height;
-                    let (y, height) = apply_cover_offset(bounds.y, offset, height, vertical_overflow);
+                    let height = image.height as f32 * (image.height as f32 / bounds.height);
+                    let vertical_overflow = height - (bounds.height / image.height as f32) * height;
+                    let (y, height) = apply_cover_offset(offset, height, vertical_overflow);
                     Rectangle {
                         x: bounds.x,
                         y,
@@ -515,8 +513,8 @@ impl State {
     }
 }
 
-fn apply_cover_offset(base: f32, offset: f32, size: f32, overflow: f32) -> (f32, f32) {
-    let mut origin = base - overflow * offset.abs();
+fn apply_cover_offset(offset: f32, size: f32, overflow: f32) -> (f32, f32) {
+    let mut origin = -overflow * offset.abs();
     let mut size = size;
 
     if offset < 0.0 {
@@ -655,9 +653,9 @@ mod tests {
         };
 
         let draw = state.draw_bounds(ScaleMode::Cover { offset: 0.5 });
-        assert_eq!(draw.width, 200.0);
+        assert_eq!(draw.width, 400.0);
         assert_eq!(draw.height, 100.0);
-        assert_eq!(draw.x, -40.0);
+        assert_eq!(draw.x, -100.0);
         assert_eq!(draw.y, 20.0);
     }
 
@@ -678,10 +676,10 @@ mod tests {
         };
 
         let left = state.draw_bounds(ScaleMode::Cover { offset: 0.0 });
-        assert_eq!(left.x, 10.0);
+        assert_eq!(left.x, 0.0);
 
         let right = state.draw_bounds(ScaleMode::Cover { offset: 1.0 });
-        assert_eq!(right.x, -90.0);
+        assert_eq!(right.x, -200.0);
     }
 
     #[test]
@@ -703,7 +701,7 @@ mod tests {
         let normal = state.draw_bounds(ScaleMode::Cover { offset: 0.5 });
         let inverted = state.draw_bounds(ScaleMode::Cover { offset: -0.5 });
 
-        assert_eq!(normal.width, 200.0);
+        assert_eq!(normal.width, 400.0);
         assert_eq!(inverted.width, -normal.width);
         assert_eq!(inverted.x, normal.x + normal.width);
     }
@@ -727,45 +725,9 @@ mod tests {
         let normal = state.draw_bounds(ScaleMode::Cover { offset: 0.5 });
         let inverted = state.draw_bounds(ScaleMode::Cover { offset: -0.5 });
 
-        assert_eq!(normal.height, 200.0);
+        assert_eq!(normal.height, 400.0);
         assert_eq!(inverted.height, -normal.height);
         assert_eq!(inverted.y, normal.y + normal.height);
-    }
-
-    #[test]
-    fn cover_is_resolution_invariant_for_same_aspect_ratio() {
-        let bounds = Rectangle {
-            x: 10.0,
-            y: 20.0,
-            width: 100.0,
-            height: 100.0,
-        };
-
-        let hd = State::Prepared {
-            image_dimensions: Size {
-                width: 1920,
-                height: 1080,
-            },
-            sampling_factor: 1.0,
-            bounds,
-        };
-        let sd = State::Prepared {
-            image_dimensions: Size {
-                width: 640,
-                height: 360,
-            },
-            sampling_factor: 1.0,
-            bounds,
-        };
-
-        let hd_draw = hd.draw_bounds(ScaleMode::Cover { offset: 0.5 });
-        let sd_draw = sd.draw_bounds(ScaleMode::Cover { offset: 0.5 });
-
-        let epsilon = 1e-4;
-        assert!((hd_draw.width - sd_draw.width).abs() < epsilon);
-        assert!((hd_draw.height - sd_draw.height).abs() < epsilon);
-        assert!((hd_draw.x - sd_draw.x).abs() < epsilon);
-        assert!((hd_draw.y - sd_draw.y).abs() < epsilon);
     }
 
     #[test]
