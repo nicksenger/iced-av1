@@ -4,10 +4,10 @@ use iced_av1::{ScaleMode, widget};
 
 const COLUMN_COUNT: usize = 5;
 const COVER_OFFSETS: [f32; COLUMN_COUNT] = [-1.0, -0.5, 0.0, 0.5, 1.0];
-const JUNGLE_MKV: &[u8] = include_bytes!("../assets/jungle.mkv");
-const JUNGLE2_MKV: &[u8] = include_bytes!("../assets/jungle2.mkv");
-const JUNGLE_480_MKV: &[u8] = include_bytes!("../assets/jungle-480.mkv");
-const JUNGLE2_480_MKV: &[u8] = include_bytes!("../assets/jungle2-480.mkv");
+const JUNGLE_MKV: &[u8] = include_bytes!("./assets/jungle.mkv");
+const JUNGLE2_MKV: &[u8] = include_bytes!("./assets/jungle2.mkv");
+const JUNGLE_480_MKV: &[u8] = include_bytes!("./assets/jungle-480.mkv");
+const JUNGLE2_480_MKV: &[u8] = include_bytes!("./assets/jungle2-480.mkv");
 
 #[derive(Debug, Clone)]
 enum Message {
