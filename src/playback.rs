@@ -116,6 +116,7 @@ struct SelectedTracks {
     timestamp_scale_ns: u64,
     video_track: u64,
     video_default_duration_ns: Option<u64>,
+    video_display_aspect_ratio: f32,
 }
 
 #[derive(Debug)]
@@ -444,6 +445,7 @@ fn play_media<R: Read + Seek>(
             submit_video_packet(
                 &mut video_decoder,
                 frame.data.clone(),
+                tracks.video_display_aspect_ratio,
                 timestamp_ns,
                 frame_duration_ns,
                 tx,
@@ -462,6 +464,7 @@ fn play_media<R: Read + Seek>(
         &mut video_decoder,
         tx,
         &mut playback_clock,
+        tracks.video_display_aspect_ratio,
         tracks
             .video_default_duration_ns
             .unwrap_or(DEFAULT_FRAME_DURATION_NS),
@@ -481,6 +484,7 @@ fn select_tracks<R: Read + Seek>(matroska: &MatroskaFile<R>) -> Result<SelectedT
 
     let mut video_track = None;
     let mut video_default_duration_ns = None;
+    let mut video_display_aspect_ratio = None;
 
     for track in matroska.tracks() {
         if track.track_type() == TrackType::Video
@@ -489,21 +493,35 @@ fn select_tracks<R: Read + Seek>(matroska: &MatroskaFile<R>) -> Result<SelectedT
         {
             video_track = Some(track.track_number().get());
             video_default_duration_ns = track.default_duration().map(|duration| duration.get());
+            video_display_aspect_ratio = track.video().map(|video| {
+                let display_width = video
+                    .display_width()
+                    .map(|value| value.get())
+                    .unwrap_or(video.pixel_width().get());
+                let display_height = video
+                    .display_height()
+                    .map(|value| value.get())
+                    .unwrap_or(video.pixel_height().get());
+                display_width as f32 / display_height as f32
+            });
         }
     }
 
     let video_track = video_track.ok_or(AvError::MissingVideoTrack)?;
+    let video_display_aspect_ratio = video_display_aspect_ratio.unwrap_or(1.0);
 
     Ok(SelectedTracks {
         timestamp_scale_ns,
         video_track,
         video_default_duration_ns,
+        video_display_aspect_ratio,
     })
 }
 
 fn submit_video_packet(
     decoder: &mut Av1Decoder,
     data: Vec<u8>,
+    display_aspect_ratio: f32,
     timestamp_ns: u64,
     frame_duration_ns: u64,
     tx: &mpsc::UnboundedSender<AvEvent>,
@@ -531,6 +549,7 @@ fn submit_video_packet(
         decoder,
         tx,
         playback_clock,
+        display_aspect_ratio,
         frame_duration_ns,
         cmd_rx,
         default_start_offset_ns,
@@ -548,6 +567,7 @@ fn submit_video_packet(
                     decoder,
                     tx,
                     playback_clock,
+                    display_aspect_ratio,
                     frame_duration_ns,
                     cmd_rx,
                     default_start_offset_ns,
@@ -567,6 +587,7 @@ fn submit_video_packet(
         decoder,
         tx,
         playback_clock,
+        display_aspect_ratio,
         frame_duration_ns,
         cmd_rx,
         default_start_offset_ns,
@@ -583,6 +604,7 @@ fn drain_video_decoder(
     decoder: &mut Av1Decoder,
     tx: &mpsc::UnboundedSender<AvEvent>,
     playback_clock: &mut PlaybackClock,
+    display_aspect_ratio: f32,
     default_frame_duration_ns: u64,
     cmd_rx: &mut mpsc::UnboundedReceiver<PlaybackCommand>,
     default_start_offset_ns: &mut u64,
@@ -638,7 +660,7 @@ fn drain_video_decoder(
         playback_clock.wait_until(timestamp_ns, frame_duration_ns);
         *playback_position_ns = next_playback_position_ns;
 
-        if let Some(yuv) = picture_to_yuv(&picture)
+        if let Some(yuv) = picture_to_yuv(&picture, display_aspect_ratio)
             && tx.send(AvEvent::VideoFrame(yuv)).is_err()
         {
             return Ok(());
@@ -648,7 +670,7 @@ fn drain_video_decoder(
     Ok(())
 }
 
-fn picture_to_yuv(picture: &Picture) -> Option<Yuv> {
+fn picture_to_yuv(picture: &Picture, display_aspect_ratio: f32) -> Option<Yuv> {
     if picture.bit_depth() != 8 {
         warn!(
             bit_depth = picture.bit_depth(),
@@ -693,6 +715,7 @@ fn picture_to_yuv(picture: &Picture) -> Option<Yuv> {
                 format: Format::I420,
                 data,
                 dimensions,
+                display_aspect_ratio,
             })
         }
         PixelLayout::I444 => {
@@ -724,6 +747,7 @@ fn picture_to_yuv(picture: &Picture) -> Option<Yuv> {
                 format: Format::Y444,
                 data,
                 dimensions,
+                display_aspect_ratio,
             })
         }
         layout => {

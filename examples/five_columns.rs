@@ -1,11 +1,13 @@
 use iced::widget::{container, row, text};
 use iced::{Element, Fill, Subscription, Task};
-use iced_av1::{widget, ScaleMode};
+use iced_av1::{ScaleMode, widget};
 
 const COLUMN_COUNT: usize = 5;
 const COVER_OFFSETS: [f32; COLUMN_COUNT] = [-1.0, -0.5, 0.0, 0.5, 1.0];
-const JUNGLE_MKV: &[u8] = include_bytes!("../jungle.mkv");
-const JUNGLE2_MKV: &[u8] = include_bytes!("../jungle2.mkv");
+const JUNGLE_MKV: &[u8] = include_bytes!("./assets/jungle.mkv");
+const JUNGLE2_MKV: &[u8] = include_bytes!("./assets/jungle2.mkv");
+const JUNGLE_480_MKV: &[u8] = include_bytes!("./assets/jungle-480.mkv");
+const JUNGLE2_480_MKV: &[u8] = include_bytes!("./assets/jungle2-480.mkv");
 
 #[derive(Debug, Clone)]
 enum Message {
@@ -25,10 +27,24 @@ fn main() -> iced::Result {
 }
 
 fn init() -> (App, Task<Message>) {
+    let use_480p = std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--use-480p" || arg == "--480p");
+
+    let (first_video, second_video) = if use_480p {
+        (JUNGLE_480_MKV, JUNGLE2_480_MKV)
+    } else {
+        (JUNGLE_MKV, JUNGLE2_MKV)
+    };
+
     let mut players = Vec::with_capacity(COLUMN_COUNT);
 
     for (i, offset) in COVER_OFFSETS.iter().copied().enumerate() {
-        let video = if i % 2 == 0 { JUNGLE_MKV } else { JUNGLE2_MKV };
+        let video = if i % 2 == 0 {
+            first_video
+        } else {
+            second_video
+        };
         let mut state = match widget::State::new_with_media_source_and_opacity_options(
             iced_av1::MediaSource::Bytes(video.into()),
             iced_av1::PlaybackOptions { start_offset_ns: 0 },

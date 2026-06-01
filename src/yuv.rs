@@ -5,10 +5,12 @@ pub(crate) enum Renderable {
     Y444 {
         data: Vec<u8>,
         dimensions: Size<u32>,
+        display_aspect_ratio: f32,
     },
     I420 {
         data: Vec<u8>,
         dimensions: Size<u32>,
+        display_aspect_ratio: f32,
     },
 }
 
@@ -16,6 +18,19 @@ impl Renderable {
     pub fn dimensions(&self) -> Size<u32> {
         match self {
             Self::I420 { dimensions, .. } | Self::Y444 { dimensions, .. } => *dimensions,
+        }
+    }
+
+    pub fn display_aspect_ratio(&self) -> f32 {
+        match self {
+            Self::I420 {
+                display_aspect_ratio,
+                ..
+            }
+            | Self::Y444 {
+                display_aspect_ratio,
+                ..
+            } => *display_aspect_ratio,
         }
     }
 
@@ -60,6 +75,7 @@ pub struct Yuv {
     pub format: Format,
     pub data: Vec<u8>,
     pub dimensions: Size<u32>,
+    pub display_aspect_ratio: f32,
 }
 
 impl From<Yuv> for Renderable {
@@ -68,11 +84,20 @@ impl From<Yuv> for Renderable {
             mut data,
             dimensions,
             format,
+            display_aspect_ratio,
         }: Yuv,
     ) -> Self {
         match format {
-            Format::I420 => Renderable::I420 { data, dimensions },
-            Format::Y444 => Renderable::Y444 { data, dimensions },
+            Format::I420 => Renderable::I420 {
+                data,
+                dimensions,
+                display_aspect_ratio,
+            },
+            Format::Y444 => Renderable::Y444 {
+                data,
+                dimensions,
+                display_aspect_ratio,
+            },
             Format::NV12 => {
                 let n = data.len() / 6;
                 let chroma = data.split_off(n * 4);
@@ -91,7 +116,11 @@ impl From<Yuv> for Renderable {
                 data.extend(u);
                 data.extend(v);
 
-                Renderable::I420 { data, dimensions }
+                Renderable::I420 {
+                    data,
+                    dimensions,
+                    display_aspect_ratio,
+                }
             }
         }
     }
